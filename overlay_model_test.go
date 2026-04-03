@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/base64"
 	"strings"
 	"testing"
 	"time"
@@ -36,15 +37,14 @@ func TestOverlayModelPayloadSortsByLastEventAtDescending(t *testing.T) {
 		t.Fatalf("expected 2 sessions in payload, got %d", len(lines))
 	}
 
-	// Most recent session (session-new, LastEventAt=20) should be first
-	// base64("project-new") = "cHJvamVjdC1uZXc="
-	if !strings.HasPrefix(lines[0], "cHJvamVjdC1uZXc=\t") {
-		t.Fatalf("expected project-new first (most recent), got %q", lines[0])
+	first := decodePayloadFields(t, lines[0])
+	if first[0] != "session-new" || first[1] != "project-new" || first[2] != string(socket.SessionStateToolRunning) {
+		t.Fatalf("unexpected first payload line: %#v", first)
 	}
 
-	// base64("project-old") = "cHJvamVjdC1vbGQ="
-	if !strings.HasPrefix(lines[1], "cHJvamVjdC1vbGQ=\t") {
-		t.Fatalf("expected project-old second, got %q", lines[1])
+	second := decodePayloadFields(t, lines[1])
+	if second[0] != "session-old" || second[1] != "project-old" || second[2] != string(socket.SessionStateWorking) {
+		t.Fatalf("unexpected second payload line: %#v", second)
 	}
 }
 
@@ -77,10 +77,9 @@ func TestOverlayModelPayloadTiebreaksByID(t *testing.T) {
 		t.Fatalf("expected 2 sessions, got %d", len(lines))
 	}
 
-	// Same LastEventAt → sort by ID ascending
-	// base64("project-a") = "cHJvamVjdC1h"
-	if !strings.HasPrefix(lines[0], "cHJvamVjdC1h\t") {
-		t.Fatalf("expected project-a first (ID tiebreak), got %q", lines[0])
+	first := decodePayloadFields(t, lines[0])
+	if first[0] != "session-a" || first[1] != "project-a" {
+		t.Fatalf("expected session-a first (ID tiebreak), got %#v", first)
 	}
 }
 
@@ -150,8 +149,23 @@ func TestOverlayModelPayloadFallsBackToIDPrefix(t *testing.T) {
 	})
 
 	payload := model.Payload()
-	// base64("abcdefgh") = "YWJjZGVmZ2g="
-	if !strings.Contains(payload, "YWJjZGVmZ2g=") {
-		t.Fatalf("expected ID prefix fallback, got %q", payload)
+	fields := decodePayloadFields(t, strings.TrimSpace(payload))
+	if fields[1] != "abcdefgh" {
+		t.Fatalf("expected ID prefix fallback, got %#v", fields)
 	}
+}
+
+func decodePayloadFields(t *testing.T, line string) []string {
+	t.Helper()
+
+	parts := strings.Split(line, "\t")
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		decoded, err := base64.StdEncoding.DecodeString(part)
+		if err != nil {
+			t.Fatalf("decode field %q: %v", part, err)
+		}
+		out = append(out, string(decoded))
+	}
+	return out
 }

@@ -44,7 +44,6 @@ func (m *overlayModel) Apply(update socket.SessionUpdate) {
 	}
 }
 
-
 // Sessions returns a snapshot of all sessions (implements socket.Inspector).
 func (m *overlayModel) Sessions() map[string]socket.Session {
 	m.mu.RLock()
@@ -57,9 +56,17 @@ func (m *overlayModel) Sessions() map[string]socket.Session {
 	return snapshot
 }
 
+func (m *overlayModel) Session(id string) (socket.Session, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	session, ok := m.sessions[id]
+	return session, ok
+}
+
 // Payload returns a base64-encoded TSV string for the GTK UI.
 // Sessions are sorted by LastEventAt descending (most recent first).
-// Format: base64(DisplayName)\tbase64(State)\n per session.
+// Format: base64(SessionID)\tbase64(DisplayName)\tbase64(State)\n per session.
 func (m *overlayModel) Payload() string {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -86,6 +93,8 @@ func (m *overlayModel) Payload() string {
 		if name == "" {
 			name = session.ID[:8]
 		}
+		builder.WriteString(base64.StdEncoding.EncodeToString([]byte(session.ID)))
+		builder.WriteByte('\t')
 		builder.WriteString(base64.StdEncoding.EncodeToString([]byte(name)))
 		builder.WriteByte('\t')
 		builder.WriteString(base64.StdEncoding.EncodeToString([]byte(session.State)))

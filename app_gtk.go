@@ -11,6 +11,8 @@ package main
 #include <stdlib.h>
 #include <string.h>
 
+extern void way_island_focus_session(char *session_id);
+
 static GtkApplication *way_island_app = NULL;
 static GtkWidget *way_island_root = NULL;
 static GtkWidget *way_island_pill = NULL;
@@ -65,9 +67,22 @@ static gint way_island_count_sessions(const char *payload) {
 	return count;
 }
 
-static GtkWidget *way_island_build_session_row(const char *name, const char *state) {
+static void on_session_row_click(GtkGestureClick *gesture, gint n_press, gdouble x, gdouble y, gpointer user_data) {
+	(void)n_press; (void)x; (void)y; (void)user_data;
+	GtkWidget *widget = gtk_event_controller_get_widget(GTK_EVENT_CONTROLLER(gesture));
+	char *session_id = g_object_get_data(G_OBJECT(widget), "way-island-session-id");
+	if (session_id == NULL || session_id[0] == '\0') return;
+	way_island_focus_session(session_id);
+}
+
+static GtkWidget *way_island_build_session_row(const char *session_id, const char *name, const char *state) {
 	GtkWidget *row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
 	gtk_widget_add_css_class(row, "session-row");
+
+	GtkGesture *click = gtk_gesture_click_new();
+	g_object_set_data_full(G_OBJECT(row), "way-island-session-id", g_strdup(session_id), g_free);
+	g_signal_connect(click, "released", G_CALLBACK(on_session_row_click), NULL);
+	gtk_widget_add_controller(row, GTK_EVENT_CONTROLLER(click));
 
 	GtkWidget *dot = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
 	gtk_widget_add_css_class(dot, "island-status");
@@ -114,10 +129,10 @@ static void way_island_rebuild_pill(const char *payload) {
 	g_autofree char *primary_state = NULL;
 
 	if (lines[0] != NULL && lines[0][0] != '\0') {
-		g_auto(GStrv) fields = g_strsplit(lines[0], "\t", 2);
-		if (fields[0] != NULL && fields[1] != NULL) {
-			primary_name = way_island_decode_field(fields[0]);
-			primary_state = way_island_decode_field(fields[1]);
+		g_auto(GStrv) fields = g_strsplit(lines[0], "\t", 3);
+		if (fields[1] != NULL && fields[2] != NULL) {
+			primary_name = way_island_decode_field(fields[1]);
+			primary_state = way_island_decode_field(fields[2]);
 		}
 	}
 
@@ -156,13 +171,14 @@ static void way_island_rebuild_detail(const char *payload) {
 	for (gint i = 0; lines[i] != NULL; i++) {
 		if (lines[i][0] == '\0') continue;
 
-		g_auto(GStrv) fields = g_strsplit(lines[i], "\t", 2);
-		if (fields[0] == NULL || fields[1] == NULL) continue;
+		g_auto(GStrv) fields = g_strsplit(lines[i], "\t", 3);
+		if (fields[0] == NULL || fields[1] == NULL || fields[2] == NULL) continue;
 
-		g_autofree char *name = way_island_decode_field(fields[0]);
-		g_autofree char *state = way_island_decode_field(fields[1]);
+		g_autofree char *session_id = way_island_decode_field(fields[0]);
+		g_autofree char *name = way_island_decode_field(fields[1]);
+		g_autofree char *state = way_island_decode_field(fields[2]);
 
-		gtk_box_append(GTK_BOX(way_island_detail), way_island_build_session_row(name, state));
+		gtk_box_append(GTK_BOX(way_island_detail), way_island_build_session_row(session_id, name, state));
 	}
 }
 
@@ -361,20 +377,36 @@ import (
 //go:embed style.css
 var styleCSS string
 
+var gtkSessionFocuser *sessionFocuser
+
+//export way_island_focus_session
+func way_island_focus_session(sessionID *C.char) {
+	if gtkSessionFocuser == nil || sessionID == nil {
+		return
+	}
+	id := C.GoString(sessionID)
+	if id == "" {
+		return
+	}
+	log.Printf("focus requested for session_id=%s", id)
+	triggerSessionFocus(gtkSessionFocuser, id)
+}
+
 func runUI(ctx context.Context, updates <-chan socket.SessionUpdate, store *overlayModel) int {
+	gtkSessionFocuser = newSessionFocuser(store)
+	defer func() {
+		gtkSessionFocuser = nil
+	}()
+
 	cs := C.CString(styleCSS)
 	C.way_island_set_css(cs)
 	C.free(unsafe.Pointer(cs))
 
-	go func() {
-		for update := range updates {
-			log.Printf("session update type=%s session_id=%s state=%s reason=%s", update.Type, update.Session.ID, update.Session.State, update.Reason)
-			store.Apply(update)
-			cs := C.CString(store.Payload())
-			C.schedule_sessions_payload_update(cs)
-			C.free(unsafe.Pointer(cs))
-		}
-	}()
+	go forwardUIUpdates(ctx, updates, store, func(payload string) {
+		cs := C.CString(payload)
+		C.schedule_sessions_payload_update(cs)
+		C.free(unsafe.Pointer(cs))
+	})
 
 	go func() {
 		<-ctx.Done()
