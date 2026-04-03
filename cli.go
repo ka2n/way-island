@@ -16,15 +16,23 @@ import (
 	"github.com/ka2n/way-island/internal/socket"
 )
 
-// hookEventMapping maps Claude Code hook_event_name values to internal event names.
+type hookSource string
+
+const (
+	hookSourceAuto   hookSource = "auto"
+	hookSourceClaude hookSource = "claude"
+	hookSourceCodex  hookSource = "codex"
+)
+
+// hookEventMapping maps Claude Code / Codex hook event names to internal event names.
 var hookEventMapping = map[string]string{
-	"PreToolUse":        "tool_start",
-	"PostToolUse":       "tool_end",
-	"Notification":      "waiting",
-	"Stop":              "idle",
-	"SessionStart":      "session_start",
-	"SessionEnd":        "session_end",
-	"UserPromptSubmit":  "working",
+	"PreToolUse":       "tool_start",
+	"PostToolUse":      "tool_end",
+	"Notification":     "waiting",
+	"Stop":             "idle",
+	"SessionStart":     "session_start",
+	"SessionEnd":       "session_end",
+	"UserPromptSubmit": "working",
 }
 
 func run(args []string, stdin io.Reader, stderr io.Writer) int {
@@ -121,15 +129,20 @@ func runInspect(stderr io.Writer) int {
 	return 0
 }
 
-
 func runHook(args []string, stdin io.Reader, stderr io.Writer) int {
 	fs := flag.NewFlagSet("hook", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 
 	sessionID := fs.String("session", "", "Session identifier")
+	claude := fs.Bool("claude", false, "Parse the hook payload as Claude Code")
+	codex := fs.Bool("codex", false, "Parse the hook payload as Codex")
 
 	if err := fs.Parse(args); err != nil {
-		_, _ = fmt.Fprintf(stderr, "usage: way-island hook [--session <id>]\n")
+		_, _ = fmt.Fprintf(stderr, "usage: way-island hook [--session <id>] [--claude|--codex]\n")
+		return 2
+	}
+	if *claude && *codex {
+		_, _ = fmt.Fprintf(stderr, "hook source flags are mutually exclusive\n")
 		return 2
 	}
 
@@ -139,9 +152,15 @@ func runHook(args []string, stdin io.Reader, stderr io.Writer) int {
 		return 2
 	}
 
+	source := resolveHookSource(*claude, *codex, payload)
+	payload, hookEventName, err := parseHookPayload(source, payload)
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "%v\n", err)
+		return 2
+	}
+
 	debugJSON("hook payload", payload)
 
-	hookEventName, _ := payload["hook_event_name"].(string)
 	event, ok := hookEventMapping[hookEventName]
 	debugf("hook_event_name=%q -> event=%q mapped=%v", hookEventName, event, ok)
 	if !ok {
@@ -149,7 +168,7 @@ func runHook(args []string, stdin io.Reader, stderr io.Writer) int {
 		return 0
 	}
 
-	resolvedSessionID := resolveSessionID(*sessionID, payload)
+	resolvedSessionID := resolveSessionID(source, *sessionID, payload)
 	debugf("session_id=%q", resolvedSessionID)
 	if strings.TrimSpace(resolvedSessionID) == "" {
 		_, _ = fmt.Fprintf(stderr, "session ID is required\n")
@@ -217,14 +236,92 @@ func isInteractiveReader(r io.Reader) bool {
 	return info.Mode()&os.ModeCharDevice != 0
 }
 
-func resolveSessionID(flagValue string, payload map[string]any) string {
-	for _, candidate := range []string{
+func resolveHookSource(forceClaude, forceCodex bool, payload map[string]any) hookSource {
+	switch {
+	case forceClaude:
+		return hookSourceClaude
+	case forceCodex:
+		return hookSourceCodex
+	case looksLikeCodexPayload(payload):
+		return hookSourceCodex
+	default:
+		return hookSourceClaude
+	}
+}
+
+func looksLikeCodexPayload(payload map[string]any) bool {
+	if _, ok := payload["tool_input"]; ok {
+		return true
+	}
+	if _, ok := payload["tool_name"]; ok {
+		return true
+	}
+	if _, ok := payload["turn_id"]; ok {
+		return true
+	}
+	return false
+}
+
+func parseHookPayload(source hookSource, payload map[string]any) (map[string]any, string, error) {
+	switch source {
+	case hookSourceClaude:
+		return parseClaudeHookPayload(payload)
+	case hookSourceCodex:
+		return parseCodexHookPayload(payload)
+	default:
+		return nil, "", fmt.Errorf("unsupported hook source %q", source)
+	}
+}
+
+func parseClaudeHookPayload(payload map[string]any) (map[string]any, string, error) {
+	eventName := firstStringFromMap(payload, "hook_event_name", "hookEventName")
+	if strings.TrimSpace(eventName) == "" {
+		return nil, "", errors.New("hook_event_name is required")
+	}
+	return cloneHookPayload(payload), eventName, nil
+}
+
+func parseCodexHookPayload(payload map[string]any) (map[string]any, string, error) {
+	eventName := firstStringFromMap(payload, "hook_event_name", "hookEventName")
+	if strings.TrimSpace(eventName) == "" {
+		return nil, "", errors.New("hook_event_name is required")
+	}
+
+	normalized := cloneHookPayload(payload)
+	if _, ok := normalized["tool"]; !ok {
+		if toolName := firstStringFromMap(normalized, "tool_name", "toolName"); strings.TrimSpace(toolName) != "" {
+			normalized["tool"] = strings.ToLower(toolName)
+		}
+	}
+	if command := firstNestedString(normalized, "tool_input", "command"); command != "" {
+		normalized["command"] = command
+	}
+
+	return normalized, eventName, nil
+}
+
+func cloneHookPayload(payload map[string]any) map[string]any {
+	cloned := make(map[string]any, len(payload))
+	for key, value := range payload {
+		cloned[key] = value
+	}
+	return cloned
+}
+
+func resolveSessionID(source hookSource, flagValue string, payload map[string]any) string {
+	candidates := []string{
 		flagValue,
 		firstStringFromMap(payload, "session_id", "sessionId"),
 		os.Getenv("WAY_ISLAND_SESSION_ID"),
-		os.Getenv("CLAUDE_CODE_SESSION_ID"),
-		os.Getenv("CLAUDE_SESSION_ID"),
-	} {
+	}
+	switch source {
+	case hookSourceCodex:
+		candidates = append(candidates, os.Getenv("CODEX_SESSION_ID"), os.Getenv("CLAUDE_CODE_SESSION_ID"), os.Getenv("CLAUDE_SESSION_ID"))
+	default:
+		candidates = append(candidates, os.Getenv("CLAUDE_CODE_SESSION_ID"), os.Getenv("CLAUDE_SESSION_ID"), os.Getenv("CODEX_SESSION_ID"))
+	}
+
+	for _, candidate := range candidates {
 		if strings.TrimSpace(candidate) != "" {
 			return candidate
 		}
@@ -246,6 +343,14 @@ func firstStringFromMap(values map[string]any, keys ...string) string {
 	}
 
 	return ""
+}
+
+func firstNestedString(values map[string]any, parentKey string, childKeys ...string) string {
+	parent, ok := values[parentKey].(map[string]any)
+	if !ok {
+		return ""
+	}
+	return firstStringFromMap(parent, childKeys...)
 }
 
 func isSilentHookError(err error) bool {

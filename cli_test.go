@@ -50,7 +50,7 @@ func TestRunHookSendsJSONToSocket(t *testing.T) {
 func TestRunHookPrefersFlagSessionOverPayloadAndEnv(t *testing.T) {
 	t.Setenv("WAY_ISLAND_SESSION_ID", "env-session")
 
-	sessionID := resolveSessionID("flag-session", map[string]any{
+	sessionID := resolveSessionID(hookSourceClaude, "flag-session", map[string]any{
 		"session_id": "payload-session",
 	})
 
@@ -62,9 +62,36 @@ func TestRunHookPrefersFlagSessionOverPayloadAndEnv(t *testing.T) {
 func TestRunHookFallsBackToEnvironmentSession(t *testing.T) {
 	t.Setenv("CLAUDE_CODE_SESSION_ID", "env-session")
 
-	sessionID := resolveSessionID("", map[string]any{})
+	sessionID := resolveSessionID(hookSourceClaude, "", map[string]any{})
 	if sessionID != "env-session" {
 		t.Fatalf("unexpected resolved session ID: %q", sessionID)
+	}
+}
+
+func TestRunHookFallsBackToCodexEnvironmentSession(t *testing.T) {
+	t.Setenv("CODEX_SESSION_ID", "codex-session")
+
+	sessionID := resolveSessionID(hookSourceCodex, "", map[string]any{})
+	if sessionID != "codex-session" {
+		t.Fatalf("unexpected resolved session ID: %q", sessionID)
+	}
+}
+
+func TestResolveHookSourceAutoDetectsCodex(t *testing.T) {
+	source := resolveHookSource(false, false, map[string]any{
+		"hook_event_name": "PreToolUse",
+		"tool_name":       "Bash",
+	})
+	if source != hookSourceCodex {
+		t.Fatalf("unexpected source: %q", source)
+	}
+}
+
+func TestRunHookRejectsConflictingSourceFlags(t *testing.T) {
+	var stderr bytes.Buffer
+	exitCode := run([]string{"hook", "--claude", "--codex"}, bytes.NewBufferString(`{}`), &stderr)
+	if exitCode != 2 {
+		t.Fatalf("expected exit code 2, got %d", exitCode)
 	}
 }
 
@@ -177,4 +204,67 @@ func TestLoadHookPayloadDecodesJSON(t *testing.T) {
 	if string(data) != `{"ok":true}` {
 		t.Fatalf("unexpected nested payload: %s", data)
 	}
+}
+
+func TestRunHookAcceptsCodexPayloadShape(t *testing.T) {
+	runtimeDir := t.TempDir()
+	socketPath := filepath.Join(runtimeDir, "way-island.sock")
+	received := make(chan socket.Message, 1)
+
+	server := startHookTestServer(t, socketPath, socket.HandlerFunc(func(message socket.Message) {
+		received <- message
+	}))
+
+	t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
+
+	stdin := bytes.NewBufferString(`{"session_id":"stdin-session","hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"echo hi"}}`)
+	var stderr bytes.Buffer
+
+	exitCode := run([]string{"hook"}, stdin, &stderr)
+	if exitCode != 0 {
+		t.Fatalf("expected exit code 0, got %d: %s", exitCode, stderr.String())
+	}
+
+	message := <-received
+	if message.Event != "tool_start" {
+		t.Fatalf("unexpected event: %q", message.Event)
+	}
+	if message.Data["tool"] != "bash" {
+		t.Fatalf("unexpected data.tool: %#v", message.Data["tool"])
+	}
+	if message.Data["command"] != "echo hi" {
+		t.Fatalf("unexpected data.command: %#v", message.Data["command"])
+	}
+
+	shutdownHookTestServer(t, server)
+}
+
+func TestRunHookCanForceCodexParser(t *testing.T) {
+	runtimeDir := t.TempDir()
+	socketPath := filepath.Join(runtimeDir, "way-island.sock")
+	received := make(chan socket.Message, 1)
+
+	server := startHookTestServer(t, socketPath, socket.HandlerFunc(func(message socket.Message) {
+		received <- message
+	}))
+
+	t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
+
+	stdin := bytes.NewBufferString(`{"session_id":"stdin-session","hook_event_name":"PostToolUse","tool_name":"Bash","tool_input":{"command":"pwd"}}`)
+	var stderr bytes.Buffer
+
+	exitCode := run([]string{"hook", "--codex"}, stdin, &stderr)
+	if exitCode != 0 {
+		t.Fatalf("expected exit code 0, got %d: %s", exitCode, stderr.String())
+	}
+
+	message := <-received
+	if message.Event != "tool_end" {
+		t.Fatalf("unexpected event: %q", message.Event)
+	}
+	if message.Data["command"] != "pwd" {
+		t.Fatalf("unexpected data.command: %#v", message.Data["command"])
+	}
+
+	shutdownHookTestServer(t, server)
 }

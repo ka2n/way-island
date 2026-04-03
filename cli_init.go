@@ -7,38 +7,55 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
-// hookEventNames are the Claude Code hook event types way-island listens to.
-var hookEventNames = []string{"PreToolUse", "PostToolUse", "Notification", "Stop"}
+var claudeHookEventNames = []string{"PreToolUse", "PostToolUse", "Notification", "Stop"}
 
-// claudeHookEntry matches the Claude Code settings.json hook entry format.
+var codexHookEventNames = []string{"SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop"}
+
 type claudeHookEntry struct {
 	Type    string `json:"type"`
 	Command string `json:"command"`
 }
 
-// claudeHookMatcher matches the Claude Code settings.json hook matcher format.
 type claudeHookMatcher struct {
 	Matcher string            `json:"matcher"`
 	Hooks   []claudeHookEntry `json:"hooks"`
 }
 
+type codexHookFile struct {
+	Hooks map[string][]codexHookMatcher `json:"hooks"`
+}
+
+type codexHookMatcher struct {
+	Matcher string           `json:"matcher,omitempty"`
+	Hooks   []codexHookEntry `json:"hooks"`
+}
+
+type codexHookEntry struct {
+	Type    string `json:"type"`
+	Command string `json:"command"`
+}
+
+type initTarget struct {
+	Name string
+	Run  bool
+}
+
 func runInit(args []string, stderr io.Writer) int {
 	fs := flag.NewFlagSet("init", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
-	local := fs.Bool("local", false, "Write to .claude/settings.local.json in current directory instead of global settings")
+	local := fs.Bool("local", false, "Write repo-local config instead of global config")
+	claude := fs.Bool("claude", false, "Configure Claude Code hooks")
+	codex := fs.Bool("codex", false, "Configure Codex hooks")
 
 	if err := fs.Parse(args); err != nil {
-		_, _ = fmt.Fprintf(stderr, "usage: way-island init [--local]\n")
+		_, _ = fmt.Fprintf(stderr, "usage: way-island init [--local] [--claude] [--codex]\n")
 		return 2
 	}
 
-	settingsPath, err := resolveSettingsPath(*local)
-	if err != nil {
-		_, _ = fmt.Fprintf(stderr, "failed to resolve settings path: %v\n", err)
-		return 1
-	}
+	targets := resolveInitTargets(*claude, *codex)
 
 	execPath, err := os.Executable()
 	if err != nil {
@@ -46,18 +63,105 @@ func runInit(args []string, stderr io.Writer) int {
 		return 1
 	}
 
-	if err := configureHooks(settingsPath, execPath); err != nil {
-		_, _ = fmt.Fprintf(stderr, "failed to configure hooks: %v\n", err)
-		return 1
+	var configured []string
+	for _, target := range targets {
+		if !target.Run {
+			continue
+		}
+
+		var configureErr error
+		switch target.Name {
+		case "claude":
+			configureErr = configureClaude(*local, execPath)
+		case "codex":
+			configureErr = configureCodex(*local, execPath)
+		default:
+			configureErr = fmt.Errorf("unsupported target %q", target.Name)
+		}
+		if configureErr != nil {
+			_, _ = fmt.Fprintf(stderr, "failed to configure %s hooks: %v\n", target.Name, configureErr)
+			return 1
+		}
+
+		configured = append(configured, target.Name)
 	}
 
-	fmt.Printf("Configured hooks in %s\n", settingsPath)
+	fmt.Printf("Configured hooks for %s\n", strings.Join(configured, ", "))
 	fmt.Printf("Run way-island in your River init script to start the daemon.\n")
 
 	return 0
 }
 
-func resolveSettingsPath(local bool) (string, error) {
+func resolveInitTargets(claude, codex bool) []initTarget {
+	if !claude && !codex {
+		claude = true
+		codex = true
+	}
+
+	return []initTarget{
+		{Name: "claude", Run: claude},
+		{Name: "codex", Run: codex},
+	}
+}
+
+func configureClaude(local bool, execPath string) error {
+	settingsPath, err := resolveClaudeSettingsPath(local)
+	if err != nil {
+		return fmt.Errorf("resolve settings path: %w", err)
+	}
+
+	settings, err := loadJSONFile(settingsPath)
+	if err != nil {
+		return fmt.Errorf("load settings: %w", err)
+	}
+
+	hooks, _ := settings["hooks"].(map[string]any)
+	if hooks == nil {
+		hooks = make(map[string]any)
+	}
+
+	command := execPath + " hook"
+	for _, eventName := range claudeHookEventNames {
+		hooks[eventName] = ensureClaudeHookEntry(hooks[eventName], command)
+	}
+
+	settings["hooks"] = hooks
+
+	if err := saveJSONFile(settingsPath, settings); err != nil {
+		return fmt.Errorf("save settings: %w", err)
+	}
+
+	return nil
+}
+
+func configureCodex(local bool, execPath string) error {
+	hooksPath, configPath, err := resolveCodexPaths(local)
+	if err != nil {
+		return err
+	}
+
+	hooksFile, err := loadCodexHooksFile(hooksPath)
+	if err != nil {
+		return fmt.Errorf("load hooks file: %w", err)
+	}
+
+	command := execPath + " hook"
+	for _, eventName := range codexHookEventNames {
+		hooksFile.Hooks[eventName] = ensureCodexHookEntry(hooksFile.Hooks[eventName], command)
+	}
+
+	if err := saveJSONFile(hooksPath, hooksFile); err != nil {
+		return fmt.Errorf("save hooks file: %w", err)
+	}
+
+	if err := enableCodexHooksFeature(configPath); err != nil {
+		return fmt.Errorf("enable codex hook feature: %w", err)
+	}
+
+	return nil
+}
+
+func resolveClaudeSettingsPath(local bool) (string, error) {
 	if local {
 		cwd, err := os.Getwd()
 		if err != nil {
@@ -73,35 +177,29 @@ func resolveSettingsPath(local bool) (string, error) {
 	return filepath.Join(home, ".claude", "settings.json"), nil
 }
 
-func configureHooks(settingsPath, execPath string) error {
-	settings, err := loadSettingsFile(settingsPath)
+func resolveCodexPaths(local bool) (hooksPath string, configPath string, err error) {
+	if local {
+		cwd, err := os.Getwd()
+		if err != nil {
+			return "", "", err
+		}
+		return filepath.Join(cwd, ".codex", "hooks.json"), filepath.Join(cwd, ".codex", "config.toml"), nil
+	}
+
+	home, err := os.UserHomeDir()
 	if err != nil {
-		return fmt.Errorf("load settings: %w", err)
+		return "", "", err
 	}
-
-	hooks, _ := settings["hooks"].(map[string]any)
-	if hooks == nil {
-		hooks = make(map[string]any)
-	}
-
-	command := execPath + " hook"
-	for _, eventName := range hookEventNames {
-		hooks[eventName] = ensureHookEntry(hooks[eventName], command)
-	}
-
-	settings["hooks"] = hooks
-
-	return saveSettingsFile(settingsPath, settings)
+	return filepath.Join(home, ".codex", "hooks.json"), filepath.Join(home, ".codex", "config.toml"), nil
 }
 
-// ensureHookEntry adds a way-island hook entry if not already present.
-func ensureHookEntry(existing any, command string) []claudeHookMatcher {
-	matchers := toHookMatchers(existing)
+func ensureClaudeHookEntry(existing any, command string) []claudeHookMatcher {
+	matchers := toClaudeHookMatchers(existing)
 
 	for _, m := range matchers {
 		for _, h := range m.Hooks {
 			if h.Command == command {
-				return matchers // already configured
+				return matchers
 			}
 		}
 	}
@@ -112,8 +210,21 @@ func ensureHookEntry(existing any, command string) []claudeHookMatcher {
 	})
 }
 
-// toHookMatchers converts the raw JSON value to a slice of claudeHookMatcher.
-func toHookMatchers(v any) []claudeHookMatcher {
+func ensureCodexHookEntry(existing []codexHookMatcher, command string) []codexHookMatcher {
+	for _, m := range existing {
+		for _, h := range m.Hooks {
+			if h.Command == command {
+				return existing
+			}
+		}
+	}
+
+	return append(existing, codexHookMatcher{
+		Hooks: []codexHookEntry{{Type: "command", Command: command}},
+	})
+}
+
+func toClaudeHookMatchers(v any) []claudeHookMatcher {
 	if v == nil {
 		return nil
 	}
@@ -128,7 +239,7 @@ func toHookMatchers(v any) []claudeHookMatcher {
 	return matchers
 }
 
-func loadSettingsFile(path string) (map[string]any, error) {
+func loadJSONFile(path string) (map[string]any, error) {
 	data, err := os.ReadFile(path)
 	if os.IsNotExist(err) {
 		return make(map[string]any), nil
@@ -147,12 +258,12 @@ func loadSettingsFile(path string) (map[string]any, error) {
 	return settings, nil
 }
 
-func saveSettingsFile(path string, settings map[string]any) error {
+func saveJSONFile(path string, value any) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
 
-	data, err := json.MarshalIndent(settings, "", "  ")
+	data, err := json.MarshalIndent(value, "", "  ")
 	if err != nil {
 		return err
 	}
@@ -161,3 +272,100 @@ func saveSettingsFile(path string, settings map[string]any) error {
 	return os.WriteFile(path, data, 0o644)
 }
 
+func loadCodexHooksFile(path string) (codexHookFile, error) {
+	settings, err := loadJSONFile(path)
+	if err != nil {
+		return codexHookFile{}, err
+	}
+
+	file := codexHookFile{Hooks: make(map[string][]codexHookMatcher)}
+	if len(settings) == 0 {
+		return file, nil
+	}
+
+	raw, err := json.Marshal(settings)
+	if err != nil {
+		return codexHookFile{}, err
+	}
+	if err := json.Unmarshal(raw, &file); err != nil {
+		return codexHookFile{}, err
+	}
+	if file.Hooks == nil {
+		file.Hooks = make(map[string][]codexHookMatcher)
+	}
+	return file, nil
+}
+
+func enableCodexHooksFeature(path string) error {
+	data, err := os.ReadFile(path)
+	if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+
+	updated := mergeCodexHooksFeature(data)
+
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(path, updated, 0o644)
+}
+
+func mergeCodexHooksFeature(existing []byte) []byte {
+	if len(existing) == 0 {
+		return []byte("[features]\ncodex_hooks = true\n")
+	}
+
+	lines := strings.Split(string(existing), "\n")
+	featuresIndex := -1
+	for i, line := range lines {
+		if strings.TrimSpace(line) == "[features]" {
+			featuresIndex = i
+			break
+		}
+	}
+
+	if featuresIndex == -1 {
+		body := strings.TrimRight(string(existing), "\n")
+		if body == "" {
+			return []byte("[features]\ncodex_hooks = true\n")
+		}
+		return []byte(body + "\n\n[features]\ncodex_hooks = true\n")
+	}
+
+	for i := featuresIndex + 1; i < len(lines); i++ {
+		trimmed := strings.TrimSpace(lines[i])
+		if strings.HasPrefix(trimmed, "[") && strings.HasSuffix(trimmed, "]") {
+			lines = insertString(lines, i, "codex_hooks = true")
+			return normalizeTrailingNewline(lines)
+		}
+		if isCodexHooksAssignment(trimmed) {
+			lines[i] = replaceCodexHooksAssignment(lines[i])
+			return normalizeTrailingNewline(lines)
+		}
+	}
+
+	lines = append(lines, "codex_hooks = true")
+	return normalizeTrailingNewline(lines)
+}
+
+func isCodexHooksAssignment(line string) bool {
+	return strings.HasPrefix(line, "codex_hooks") && strings.Contains(line, "=")
+}
+
+func replaceCodexHooksAssignment(line string) string {
+	leading := line[:len(line)-len(strings.TrimLeft(line, " \t"))]
+	return leading + "codex_hooks = true"
+}
+
+func insertString(values []string, index int, value string) []string {
+	values = append(values, "")
+	copy(values[index+1:], values[index:])
+	values[index] = value
+	return values
+}
+
+func normalizeTrailingNewline(lines []string) []byte {
+	text := strings.Join(lines, "\n")
+	text = strings.TrimRight(text, "\n") + "\n"
+	return []byte(text)
+}
