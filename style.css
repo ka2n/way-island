@@ -1,5 +1,11 @@
-window {
+window.background {
   background: transparent;
+  box-shadow: none;
+}
+
+frame {
+  border: none;
+  padding: 0;
 }
 
 /* Main pill */
@@ -7,7 +13,7 @@ window {
   background: rgba(12, 15, 22, 0.94);
   border: 1px solid rgba(110, 125, 148, 0.38);
   border-top: none;
-  border-radius: 0 0 8px 8px;
+  border-radius: 0 0 16px 16px;
   min-width: 200px;
   transition: 120ms ease-out;
 }
@@ -16,7 +22,7 @@ window {
   margin: 15px 20px 10px 20px;
 }
 
-.island-pill.empty {
+frame.island-pill.empty {
   background: rgba(12, 15, 22, 0.72);
   border: 1px solid rgba(110, 125, 148, 0.18);
   border-top: none;

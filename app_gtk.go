@@ -14,6 +14,7 @@ package main
 extern void way_island_focus_session(char *session_id);
 
 static GtkApplication *way_island_app = NULL;
+static GtkWidget *way_island_shell = NULL;
 static GtkWidget *way_island_root = NULL;
 static GtkWidget *way_island_pill = NULL;
 static GtkWidget *way_island_revealer = NULL;
@@ -183,17 +184,17 @@ static void way_island_rebuild_detail(const char *payload) {
 }
 
 static void way_island_rebuild_ui(const char *payload) {
-	if (way_island_root == NULL) return;
+	if (way_island_root == NULL || way_island_shell == NULL) return;
 
 	gboolean has_sessions = (payload != NULL && payload[0] != '\0');
 
 	if (has_sessions) {
-		gtk_widget_remove_css_class(way_island_root, "empty");
-		gtk_widget_add_css_class(way_island_root, "island-pill");
+		gtk_widget_remove_css_class(way_island_shell, "empty");
+		gtk_widget_add_css_class(way_island_shell, "island-pill");
 	} else {
-		gtk_widget_add_css_class(way_island_root, "empty");
-		gtk_widget_remove_css_class(way_island_root, "island-pill");
-		gtk_widget_remove_css_class(way_island_root, "expanded");
+		gtk_widget_add_css_class(way_island_shell, "empty");
+		gtk_widget_remove_css_class(way_island_shell, "island-pill");
+		gtk_widget_remove_css_class(way_island_shell, "expanded");
 		way_island_expanded = FALSE;
 	}
 
@@ -214,7 +215,7 @@ static void on_hover_enter(GtkEventControllerMotion *controller, double x, doubl
 	if (way_island_expanded) return;
 
 	way_island_expanded = TRUE;
-	gtk_widget_add_css_class(way_island_root, "expanded");
+	gtk_widget_add_css_class(way_island_shell, "expanded");
 	way_island_rebuild_detail(way_island_sessions_payload);
 	gtk_revealer_set_reveal_child(GTK_REVEALER(way_island_revealer), TRUE);
 }
@@ -225,7 +226,7 @@ static void on_hover_leave(GtkEventControllerMotion *controller, gpointer user_d
 	if (!way_island_expanded) return;
 
 	way_island_expanded = FALSE;
-	gtk_widget_remove_css_class(way_island_root, "expanded");
+	gtk_widget_remove_css_class(way_island_shell, "expanded");
 	gtk_revealer_set_reveal_child(GTK_REVEALER(way_island_revealer), FALSE);
 }
 
@@ -269,8 +270,11 @@ static void on_activate(GtkApplication *app, gpointer user_data) {
 	g_object_unref(provider);
 
 	// root: vertical container (pill on top, detail below)
+	way_island_shell = gtk_frame_new(NULL);
+	gtk_widget_add_css_class(way_island_shell, "empty");
+
 	way_island_root = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
-	gtk_widget_add_css_class(way_island_root, "empty");
+	gtk_frame_set_child(GTK_FRAME(way_island_shell), way_island_root);
 
 	// pill: collapsed summary bar
 	way_island_pill = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
@@ -294,7 +298,7 @@ static void on_activate(GtkApplication *app, gpointer user_data) {
 	GtkEventController *motion = gtk_event_controller_motion_new();
 	g_signal_connect(motion, "enter", G_CALLBACK(on_hover_enter), NULL);
 	g_signal_connect(motion, "leave", G_CALLBACK(on_hover_leave), NULL);
-	gtk_widget_add_controller(way_island_root, motion);
+	gtk_widget_add_controller(way_island_shell, motion);
 
 	way_island_rebuild_ui(way_island_sessions_payload);
 	if (way_island_should_quit) {
@@ -304,7 +308,7 @@ static void on_activate(GtkApplication *app, gpointer user_data) {
 	gtk_window_set_title(window, "way-island");
 	gtk_window_set_resizable(window, FALSE);
 	gtk_window_set_decorated(window, FALSE);
-	gtk_window_set_child(window, way_island_root);
+	gtk_window_set_child(window, way_island_shell);
 
 	if (gtk_layer_is_supported()) {
 		gtk_layer_init_for_window(window);
@@ -351,6 +355,7 @@ static int run_app(void) {
 	status = g_application_run(G_APPLICATION(app), 0, NULL);
 	g_clear_pointer(&way_island_sessions_payload, g_free);
 	g_clear_pointer(&way_island_css_data, g_free);
+	way_island_shell = NULL;
 	way_island_detail = NULL;
 	way_island_revealer = NULL;
 	way_island_pill = NULL;
@@ -398,7 +403,15 @@ func runUI(ctx context.Context, updates <-chan socket.SessionUpdate, store *over
 		gtkSessionFocuser = nil
 	}()
 
-	cs := C.CString(styleCSS)
+	appCSS, err := loadAppCSS(styleCSS)
+	if err != nil {
+		log.Printf("load user CSS override: %v", err)
+	}
+	if appCSS == "" {
+		appCSS = styleCSS
+	}
+
+	cs := C.CString(appCSS)
 	C.way_island_set_css(cs)
 	C.free(unsafe.Pointer(cs))
 
