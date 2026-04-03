@@ -28,6 +28,11 @@ type Handler interface {
 	HandleMessage(Message)
 }
 
+// Inspector provides session state for the inspect command.
+type Inspector interface {
+	Sessions() map[string]Session
+}
+
 type HandlerFunc func(Message)
 
 func (f HandlerFunc) HandleMessage(message Message) {
@@ -35,8 +40,9 @@ func (f HandlerFunc) HandleMessage(message Message) {
 }
 
 type Server struct {
-	path    string
-	handler Handler
+	path      string
+	handler   Handler
+	inspector Inspector
 
 	mu       sync.Mutex
 	listener net.Listener
@@ -64,11 +70,24 @@ func NewServer(path string, handler Handler) (*Server, error) {
 		handler = HandlerFunc(func(Message) {})
 	}
 
-	return &Server{
+	srv := &Server{
 		path:    path,
 		handler: handler,
 		waitCh:  make(chan struct{}),
-	}, nil
+	}
+
+	// If handler implements Inspector, use it as default
+	if insp, ok := handler.(Inspector); ok {
+		srv.inspector = insp
+	}
+
+	return srv, nil
+}
+
+// SetInspector sets the inspector used by the _inspect command.
+// This overrides any inspector derived from the handler.
+func (s *Server) SetInspector(insp Inspector) {
+	s.inspector = insp
 }
 
 func (s *Server) Start(ctx context.Context) error {
@@ -156,11 +175,46 @@ func (s *Server) handleConn(conn net.Conn) {
 			if errors.Is(err, io.EOF) {
 				return
 			}
+			debugf("handleConn: decode error: %v", err)
 			return
 		}
 
+		if message.Event == "_inspect" && s.inspector != nil {
+			s.handleInspect(conn)
+			return
+		}
+
+		debugf("handleConn: received session_id=%s event=%s", message.SessionID, message.Event)
 		s.handler.HandleMessage(message)
 	}
+}
+
+func (s *Server) handleInspect(conn net.Conn) {
+	sessions := s.inspector.Sessions()
+
+	type sessionJSON struct {
+		ID          string `json:"id"`
+		DisplayName string `json:"display_name"`
+		State       string `json:"state"`
+		LastEventAt string `json:"last_event_at"`
+		ClaudePID   int    `json:"claude_pid,omitempty"`
+	}
+
+	result := make([]sessionJSON, 0, len(sessions))
+	for _, s := range sessions {
+		result = append(result, sessionJSON{
+			ID:          s.ID,
+			DisplayName: s.DisplayName,
+			State:       string(s.State),
+			LastEventAt: s.LastEventAt.Format("2006-01-02T15:04:05Z07:00"),
+			ClaudePID:   s.ClaudePID,
+		})
+	}
+
+	_ = json.NewEncoder(conn).Encode(map[string]any{
+		"pid":      os.Getpid(),
+		"sessions": result,
+	})
 }
 
 func (s *Server) cleanup() {
