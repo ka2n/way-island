@@ -2,7 +2,9 @@ package socket
 
 import (
 	"context"
+	"path/filepath"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -19,8 +21,10 @@ const (
 
 type Session struct {
 	ID          string
+	DisplayName string
 	State       SessionState
 	LastEventAt time.Time
+	ClaudePID   int // PID of the Claude Code process (from hooks)
 }
 
 type SessionUpdateType string
@@ -33,6 +37,7 @@ const (
 type SessionUpdate struct {
 	Type    SessionUpdateType
 	Session Session
+	Reason  string // human-readable reason for the update (e.g. hook event name)
 }
 
 type SessionManager struct {
@@ -62,7 +67,7 @@ func (m *SessionManager) Updates() <-chan SessionUpdate {
 
 func (m *SessionManager) HandleMessage(message Message) {
 	if message.Event == "session_end" {
-		m.removeSession(message.SessionID)
+		m.removeSession(message.SessionID, "hook:session_end")
 		return
 	}
 
@@ -71,23 +76,26 @@ func (m *SessionManager) HandleMessage(message Message) {
 		return
 	}
 
+	m.mu.Lock()
+	existing := m.sessions[message.SessionID]
 	session := Session{
 		ID:          message.SessionID,
+		DisplayName: resolveDisplayName(existing.DisplayName, message.Data),
 		State:       state,
 		LastEventAt: m.now(),
+		ClaudePID:   resolveClaudePID(existing.ClaudePID, message.Data),
 	}
-
-	m.mu.Lock()
 	m.sessions[message.SessionID] = session
 	m.mu.Unlock()
 
 	m.notify(SessionUpdate{
 		Type:    SessionUpdateUpsert,
 		Session: session,
+		Reason:  "hook:" + message.Event,
 	})
 }
 
-func (m *SessionManager) removeSession(sessionID string) {
+func (m *SessionManager) removeSession(sessionID string, reason string) {
 	m.mu.Lock()
 	session, ok := m.sessions[sessionID]
 	if ok {
@@ -102,6 +110,7 @@ func (m *SessionManager) removeSession(sessionID string) {
 	m.notify(SessionUpdate{
 		Type:    SessionUpdateTimeout,
 		Session: session,
+		Reason:  reason,
 	})
 }
 
@@ -145,6 +154,9 @@ func (m *SessionManager) pruneExpired(now time.Time) {
 		if now.Sub(session.LastEventAt) < m.timeout {
 			continue
 		}
+		if session.ClaudePID > 0 && isProcessAlive(session.ClaudePID) {
+			continue
+		}
 
 		expired = append(expired, session)
 		delete(m.sessions, id)
@@ -155,6 +167,7 @@ func (m *SessionManager) pruneExpired(now time.Time) {
 		m.notify(SessionUpdate{
 			Type:    SessionUpdateTimeout,
 			Session: session,
+			Reason:  "timeout",
 		})
 	}
 }
@@ -163,7 +176,32 @@ func (m *SessionManager) notify(update SessionUpdate) {
 	select {
 	case m.updates <- update:
 	default:
+		debugf("notify: dropped update session_id=%s event=%s (channel full)", update.Session.ID, update.Reason)
 	}
+}
+
+// resolveDisplayName returns a human-readable name for the session.
+// It prefers the cwd basename from the hook payload; falls back to the existing name.
+func resolveDisplayName(existing string, data map[string]any) string {
+	if cwd, ok := data["cwd"].(string); ok && cwd != "" {
+		if name := filepath.Base(cwd); name != "" && name != "." {
+			return name
+		}
+	}
+	return existing
+}
+
+// resolveClaudePID extracts the Claude Code PID from hook payload.
+// The _ppid field is set by the hook process using os.Getppid().
+func resolveClaudePID(existing int, data map[string]any) int {
+	if ppid, ok := data["_ppid"].(float64); ok && ppid > 0 {
+		return int(ppid)
+	}
+	return existing
+}
+
+func isProcessAlive(pid int) bool {
+	return syscall.Kill(pid, 0) == nil
 }
 
 func sessionStateFromEvent(event string) (SessionState, bool) {
