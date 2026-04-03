@@ -1,0 +1,104 @@
+window {
+  background: transparent;
+}
+
+/* Main pill */
+.island-pill {
+  background: rgba(12, 15, 22, 0.94);
+  border: 1px solid rgba(110, 125, 148, 0.38);
+  border-top: none;
+  border-radius: 0 0 8px 8px;
+  min-width: 200px;
+  transition: 120ms ease-out;
+}
+
+.island-content {
+  margin: 15px 20px 10px 20px;
+}
+
+.island-pill.empty {
+  background: rgba(12, 15, 22, 0.72);
+  border: 1px solid rgba(110, 125, 148, 0.18);
+  border-top: none;
+  min-width: 8px;
+  min-height: 8px;
+  padding: 4px 8px;
+  border-radius: 0 0 12px 12px;
+  box-shadow: none;
+}
+
+.island-icon {
+  font-size: 14px;
+}
+
+.island-title {
+  color: #f8fafc;
+  font-weight: 600;
+  font-size: 12px;
+}
+
+.island-status {
+  min-width: 8px;
+  min-height: 8px;
+  border-radius: 999px;
+}
+
+.island-status.working {
+  background: #4ade80;
+}
+
+.island-status.tool-running {
+  background: #60a5fa;
+}
+
+.island-status.waiting {
+  background: #fbbf24;
+}
+
+.island-status.idle {
+  background: #94a3b8;
+}
+
+.island-badge {
+  background: rgba(148, 163, 184, 0.3);
+  border-radius: 999px;
+  padding: 2px 7px;
+  font-size: 11px;
+  font-weight: 700;
+  color: #94a3b8;
+}
+
+.empty-dot {
+  background: rgba(148, 163, 184, 0.7);
+  min-width: 8px;
+  min-height: 8px;
+  border-radius: 999px;
+}
+
+/* Expanded detail */
+.island-detail {
+  margin: 4px 16px 12px 16px;
+  border-top: 1px solid rgba(110, 125, 148, 0.2);
+  padding-top: 8px;
+}
+
+.session-row {
+  padding: 8px 10px;
+  border-radius: 8px;
+  transition: 80ms ease-out;
+}
+
+.session-row:hover {
+  background: rgba(148, 163, 184, 0.1);
+}
+
+.session-row-title {
+  color: #f8fafc;
+  font-weight: 600;
+  font-size: 12px;
+}
+
+.session-row-status {
+  color: #94a3b8;
+  font-size: 11px;
+}
