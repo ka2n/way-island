@@ -344,10 +344,22 @@ func (ui *gtkUI) rebuildPill(sessions []payloadSession, pill pillViewModel) {
 	counts.AddCSSClass("island-counts")
 	counts.SetHAlign(gtkmini.AlignEnd)
 	counts.SetVAlign(gtkmini.AlignCenter)
-	counts.Append(ui.buildCountBadge("waiting", waitingCount))
-	counts.Append(ui.buildCountBadge("working", workingCount))
-	counts.Append(ui.buildCountBadge("other", otherCount))
-	ui.pill.Append(counts)
+	hasVisibleCount := false
+	if waitingCount > 0 {
+		counts.Append(ui.buildCountBadge("waiting", waitingCount))
+		hasVisibleCount = true
+	}
+	if workingCount > 0 {
+		counts.Append(ui.buildCountBadge("working", workingCount))
+		hasVisibleCount = true
+	}
+	if otherCount > 0 {
+		counts.Append(ui.buildCountBadge("other", otherCount))
+		hasVisibleCount = true
+	}
+	if hasVisibleCount {
+		ui.pill.Append(counts)
+	}
 }
 
 func (ui *gtkUI) buildSessionRow(session payloadSession) *gtkmini.Widget {
