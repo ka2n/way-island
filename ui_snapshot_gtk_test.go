@@ -3,86 +3,67 @@
 package main
 
 import (
-	"image/png"
 	"os"
+	"path/filepath"
 	"testing"
 )
 
 func TestGTKSnapshotEmptyState(t *testing.T) {
-	path := renderTestOutputPath(t, "gtk-empty.png")
-	if err := saveGTKSnapshot(path, "", panelViewClosed, ""); err != nil {
-		t.Skipf("skip GTK snapshot test: %v", err)
-	}
-
-	width, height := readSnapshotPNGSize(t, path)
-	if width <= 0 || height <= 0 {
-		t.Fatalf("unexpected snapshot size: %dx%d", width, height)
-	}
+	assertGTKSnapshotMatches(t, "gtk-empty.png", "", panelViewClosed, "")
 }
 
 func TestGTKSnapshotListState(t *testing.T) {
-	emptyPath := renderTestOutputPath(t, "gtk-empty.png")
-	if err := saveGTKSnapshot(emptyPath, "", panelViewClosed, ""); err != nil {
-		t.Skipf("skip GTK snapshot test: %v", err)
-	}
-	emptyWidth, emptyHeight := readSnapshotPNGSize(t, emptyPath)
-
 	payload := encodePayloadSessions([]payloadSession{
 		{ID: "session-1", Name: "Alpha", State: "waiting", Action: "Approval needed"},
 		{ID: "session-2", Name: "Beta", State: "working", Action: ""},
 	})
-	path := renderTestOutputPath(t, "gtk-list.png")
-	if err := saveGTKSnapshot(path, payload, panelViewList, ""); err != nil {
-		t.Skipf("skip GTK snapshot test: %v", err)
-	}
-
-	width, height := readSnapshotPNGSize(t, path)
-	if width < emptyWidth {
-		t.Fatalf("list width = %d, want at least %d", width, emptyWidth)
-	}
-	if height <= emptyHeight {
-		t.Fatalf("list height = %d, want more than %d", height, emptyHeight)
-	}
+	assertGTKSnapshotMatches(t, "gtk-list.png", payload, panelViewList, "")
 }
 
 func TestGTKSnapshotDetailState(t *testing.T) {
-	emptyPath := renderTestOutputPath(t, "gtk-empty.png")
-	if err := saveGTKSnapshot(emptyPath, "", panelViewClosed, ""); err != nil {
-		t.Skipf("skip GTK snapshot test: %v", err)
-	}
-	emptyWidth, emptyHeight := readSnapshotPNGSize(t, emptyPath)
-
 	payload := encodePayloadSessions([]payloadSession{
 		{ID: "session-1", Name: "Alpha", State: "tool_running", Action: "Bash: go test ./..."},
 		{ID: "session-2", Name: "Beta", State: "idle", Action: ""},
 	})
-	path := renderTestOutputPath(t, "gtk-detail.png")
-	if err := saveGTKSnapshot(path, payload, panelViewDetail, "session-1"); err != nil {
+	assertGTKSnapshotMatches(t, "gtk-detail.png", payload, panelViewDetail, "session-1")
+}
+
+func assertGTKSnapshotMatches(t *testing.T, snapshotName, payload string, panelView int, selectedSessionID string) {
+	t.Helper()
+
+	actualPath := renderTestOutputPath(t, snapshotName)
+	if err := saveGTKSnapshot(actualPath, payload, panelView, selectedSessionID); err != nil {
 		t.Skipf("skip GTK snapshot test: %v", err)
 	}
 
-	width, height := readSnapshotPNGSize(t, path)
-	if width < emptyWidth {
-		t.Fatalf("detail width = %d, want at least %d", width, emptyWidth)
+	expectedPath := filepath.Join("testdata", "snapshots", snapshotName)
+	if os.Getenv("WAY_ISLAND_ACCEPT_SNAPSHOTS") == "1" {
+		if err := updateSnapshotBaseline(expectedPath, actualPath); err != nil {
+			t.Fatalf("update snapshot baseline: %v", err)
+		}
 	}
-	if height <= emptyHeight {
-		t.Fatalf("detail height = %d, want more than %d", height, emptyHeight)
+	if _, err := os.Stat(expectedPath); err != nil {
+		t.Fatalf("missing expected snapshot %s; run with WAY_ISLAND_ACCEPT_SNAPSHOTS=1", expectedPath)
+	}
+
+	diffPath := renderTestOutputPath(t, snapshotName+".diff.png")
+	result, err := compareSnapshotImages(expectedPath, actualPath, diffPath, 0.1)
+	if err != nil {
+		t.Fatalf("compare snapshot: %v", err)
+	}
+	if result.DiffRatio > defaultSnapshotDiffRatio {
+		t.Fatalf("snapshot diff too large: ratio=%.4f diff_pixels=%d diff=%s actual=%s expected=%s",
+			result.DiffRatio, result.DiffPixels, result.DiffPath, actualPath, expectedPath)
 	}
 }
 
-func readSnapshotPNGSize(t *testing.T, path string) (int, int) {
-	t.Helper()
-
-	file, err := os.Open(path)
+func updateSnapshotBaseline(expectedPath, actualPath string) error {
+	data, err := os.ReadFile(actualPath)
 	if err != nil {
-		t.Fatalf("open snapshot: %v", err)
+		return err
 	}
-	defer file.Close()
-
-	img, err := png.Decode(file)
-	if err != nil {
-		t.Fatalf("decode snapshot: %v", err)
+	if err := os.MkdirAll(filepath.Dir(expectedPath), 0o755); err != nil {
+		return err
 	}
-
-	return img.Bounds().Dx(), img.Bounds().Dy()
+	return os.WriteFile(expectedPath, data, 0o644)
 }

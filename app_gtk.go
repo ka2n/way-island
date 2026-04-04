@@ -12,6 +12,11 @@ package main
 #include <string.h>
 
 extern void way_island_focus_session(char *session_id);
+extern char* way_island_build_pill_view_model(char *payload);
+extern char* way_island_build_list_view_model(char *payload);
+extern char* way_island_build_detail_view_model(char *payload, int panel_view, char *selected_session_id);
+extern int way_island_overlay_has_sessions(char *payload);
+extern int way_island_overlay_stack_view(char *payload, int panel_view, char *selected_session_id);
 
 static GtkApplication *way_island_app = NULL;
 static GtkWidget *way_island_shell = NULL;
@@ -257,7 +262,7 @@ static GtkWidget *way_island_build_session_row(const char *session_id, const cha
 
 	GtkWidget *dot = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
 	gtk_widget_add_css_class(dot, "island-status");
-	gtk_widget_add_css_class(dot, way_island_status_class(state));
+	gtk_widget_add_css_class(dot, state);
 	gtk_widget_set_valign(dot, GTK_ALIGN_CENTER);
 	gtk_box_append(GTK_BOX(row), dot);
 
@@ -335,55 +340,30 @@ static void way_island_rebuild_pill(const char *payload) {
 	if (way_island_pill == NULL) return;
 
 	way_island_clear_children(way_island_pill);
-
-	g_autofree char *primary_name = NULL;
-	g_autofree char *primary_state = NULL;
-	gint session_count = 0;
-	gint waiting_count = 0;
-	gint working_count = 0;
-	gint other_count = 0;
-
-	if (payload != NULL && payload[0] != '\0') {
-		g_auto(GStrv) lines = g_strsplit(payload, "\n", -1);
-		session_count = way_island_count_sessions(payload);
-
-		for (gint i = 0; lines[i] != NULL; i++) {
-			if (lines[i][0] == '\0') continue;
-
-			g_auto(GStrv) fields = g_strsplit(lines[i], "\t", 5);
-			if (fields[0] == NULL || fields[1] == NULL || fields[2] == NULL) continue;
-
-			g_autofree char *state = way_island_decode_field(fields[2]);
-			const char *group = way_island_session_group(state);
-			if (g_strcmp0(group, "waiting") == 0) {
-				waiting_count++;
-			} else if (g_strcmp0(group, "working") == 0) {
-				working_count++;
-			} else {
-				other_count++;
-			}
-
-			if (primary_name == NULL) {
-				primary_name = way_island_decode_field(fields[1]);
-				primary_state = way_island_decode_field(fields[2]);
-			}
-		}
+	char *pill_payload = way_island_build_pill_view_model((char *)(payload != NULL ? payload : ""));
+	g_auto(GStrv) fields = g_strsplit(pill_payload, "\t", 7);
+	if (fields[0] == NULL || fields[1] == NULL || fields[2] == NULL || fields[3] == NULL || fields[4] == NULL || fields[5] == NULL || fields[6] == NULL) {
+		free(pill_payload);
+		return;
 	}
 
-	if (primary_name == NULL) {
-		primary_name = g_strdup("No sessions");
-		primary_state = g_strdup("idle");
-	}
+	g_autofree char *primary_name = way_island_decode_field(fields[0]);
+	g_autofree char *primary_state_class = way_island_decode_field(fields[1]);
+	gboolean clickable = (g_strcmp0(fields[2], "1") == 0);
+	gint session_count = (gint)g_ascii_strtoll(fields[3], NULL, 10);
+	gint waiting_count = (gint)g_ascii_strtoll(fields[4], NULL, 10);
+	gint working_count = (gint)g_ascii_strtoll(fields[5], NULL, 10);
+	gint other_count = (gint)g_ascii_strtoll(fields[6], NULL, 10);
 
 	GtkWidget *status = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
 	gtk_widget_add_css_class(status, "island-status");
-	gtk_widget_add_css_class(status, way_island_status_class(primary_state));
+	gtk_widget_add_css_class(status, primary_state_class);
 	gtk_widget_set_valign(status, GTK_ALIGN_CENTER);
 
 	GtkWidget *summary = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
 	gtk_widget_add_css_class(summary, "island-summary");
 	gtk_widget_set_hexpand(summary, TRUE);
-	if (session_count > 0) {
+	if (clickable) {
 		GtkGesture *click = gtk_gesture_click_new();
 		g_signal_connect(click, "released", G_CALLBACK(on_primary_click), NULL);
 		gtk_widget_add_controller(summary, GTK_EVENT_CONTROLLER(click));
@@ -414,37 +394,44 @@ static void way_island_rebuild_pill(const char *payload) {
 		gtk_box_append(GTK_BOX(counts), way_island_build_count_badge("other", other_count));
 		gtk_box_append(GTK_BOX(way_island_pill), counts);
 	}
+	free(pill_payload);
 }
 
 static void way_island_rebuild_list(const char *payload) {
 	if (way_island_list_page == NULL) return;
 
 	way_island_clear_children(way_island_list_page);
+	char *list_payload = way_island_build_list_view_model((char *)(payload != NULL ? payload : ""));
+	g_auto(GStrv) lines = g_strsplit(list_payload, "\n", -1);
+	if (lines[0] == NULL) {
+		free(list_payload);
+		return;
+	}
 
 	GtkWidget *header = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
 	gtk_widget_add_css_class(header, "detail-header");
 
-	GtkWidget *title = gtk_label_new("Sessions");
+	g_autofree char *title_text = way_island_decode_field(lines[0]);
+	GtkWidget *title = gtk_label_new(title_text);
 	gtk_widget_add_css_class(title, "detail-title");
 	gtk_label_set_xalign(GTK_LABEL(title), 0.0f);
 	gtk_box_append(GTK_BOX(header), title);
 	gtk_box_append(GTK_BOX(way_island_list_page), header);
 
-	g_auto(GStrv) lines = g_strsplit(payload, "\n", -1);
-	for (gint i = 0; lines[i] != NULL; i++) {
+	for (gint i = 1; lines[i] != NULL; i++) {
 		if (lines[i][0] == '\0') continue;
 
-		g_auto(GStrv) fields = g_strsplit(lines[i], "\t", 5);
-		if (fields[0] == NULL || fields[1] == NULL || fields[2] == NULL) continue;
+		g_auto(GStrv) fields = g_strsplit(lines[i], "\t", 4);
+		if (fields[0] == NULL || fields[1] == NULL || fields[2] == NULL || fields[3] == NULL) continue;
 
 		g_autofree char *session_id = way_island_decode_field(fields[0]);
 		g_autofree char *name = way_island_decode_field(fields[1]);
-		g_autofree char *state = way_island_decode_field(fields[2]);
-		g_autofree char *action = fields[3] != NULL ? way_island_decode_field(fields[3]) : g_strdup("");
-		g_autofree char *last_user_message = fields[4] != NULL ? way_island_decode_field(fields[4]) : g_strdup("");
+		g_autofree char *state_class = way_island_decode_field(fields[2]);
+		g_autofree char *detail_text = way_island_decode_field(fields[3]);
 
-		gtk_box_append(GTK_BOX(way_island_list_page), way_island_build_session_row(session_id, name, state, action, last_user_message));
+		gtk_box_append(GTK_BOX(way_island_list_page), way_island_build_session_row(session_id, name, state_class, detail_text, ""));
 	}
+	free(list_payload);
 }
 
 static gboolean way_island_rebuild_selected_detail(const char *payload) {
@@ -455,20 +442,33 @@ static gboolean way_island_rebuild_selected_detail(const char *payload) {
 
 	way_island_clear_children(way_island_detail_page);
 
-	g_auto(GStrv) lines = g_strsplit(payload, "\n", -1);
-	for (gint i = 0; lines[i] != NULL; i++) {
-		if (lines[i][0] == '\0') continue;
+	char *detail_payload = way_island_build_detail_view_model((char *)payload, way_island_panel_view, (char *)selected_id);
+	if (detail_payload == NULL || detail_payload[0] == '\0') {
+		free(detail_payload);
+		return FALSE;
+	}
 
-		g_auto(GStrv) fields = g_strsplit(lines[i], "\t", 5);
-		if (fields[0] == NULL || fields[1] == NULL || fields[2] == NULL) continue;
+	g_auto(GStrv) lines = g_strsplit(detail_payload, "\n", -1);
+	if (lines[0] == NULL || lines[0][0] == '\0') {
+		free(detail_payload);
+		return FALSE;
+	}
 
-		g_autofree char *session_id = way_island_decode_field(fields[0]);
-		if (g_strcmp0(session_id, selected_id) != 0) continue;
+	g_auto(GStrv) fields = g_strsplit(lines[0], "\t", 6);
+	if (fields[0] == NULL || fields[1] == NULL || fields[2] == NULL || fields[3] == NULL || fields[4] == NULL) {
+		free(detail_payload);
+		return FALSE;
+	}
 
-		g_autofree char *name = way_island_decode_field(fields[1]);
-		g_autofree char *state = way_island_decode_field(fields[2]);
-		g_autofree char *action = fields[3] != NULL ? way_island_decode_field(fields[3]) : g_strdup("");
-		g_autofree char *last_user_message = fields[4] != NULL ? way_island_decode_field(fields[4]) : g_strdup("");
+	g_autofree char *session_id = way_island_decode_field(fields[0]);
+	g_autofree char *name = way_island_decode_field(fields[1]);
+	g_autofree char *state_class = way_island_decode_field(fields[2]);
+	g_autofree char *status_label_text = way_island_decode_field(fields[3]);
+	g_autofree char *detail_text = way_island_decode_field(fields[4]);
+	gint subagent_count = 0;
+	if (fields[5] != NULL) {
+		subagent_count = (gint)g_ascii_strtoll(fields[5], NULL, 10);
+	}
 
 		GtkWidget *header = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
 		gtk_widget_add_css_class(header, "detail-header");
@@ -507,6 +507,7 @@ static gboolean way_island_rebuild_selected_detail(const char *payload) {
 		gtk_widget_add_css_class(detail_name, "detail-session-title");
 		gtk_label_set_xalign(GTK_LABEL(detail_name), 0.0f);
 		gtk_label_set_wrap(GTK_LABEL(detail_name), TRUE);
+		gtk_label_set_wrap_mode(GTK_LABEL(detail_name), PANGO_WRAP_WORD_CHAR);
 		gtk_box_append(GTK_BOX(card_content), detail_name);
 
 		GtkWidget *state_row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
@@ -514,28 +515,23 @@ static gboolean way_island_rebuild_selected_detail(const char *payload) {
 
 		GtkWidget *dot = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
 		gtk_widget_add_css_class(dot, "island-status");
-		gtk_widget_add_css_class(dot, way_island_status_class(state));
+		gtk_widget_add_css_class(dot, state_class);
 		gtk_widget_set_valign(dot, GTK_ALIGN_CENTER);
 		gtk_box_append(GTK_BOX(state_row), dot);
 
-		GtkWidget *state_label = gtk_label_new(way_island_status_label(state));
+		GtkWidget *state_label = gtk_label_new(status_label_text);
 		gtk_widget_add_css_class(state_label, "detail-state-label");
 		gtk_label_set_xalign(GTK_LABEL(state_label), 0.0f);
+		gtk_label_set_wrap(GTK_LABEL(state_label), TRUE);
+		gtk_label_set_wrap_mode(GTK_LABEL(state_label), PANGO_WRAP_WORD_CHAR);
 		gtk_box_append(GTK_BOX(state_row), state_label);
 
-		g_autofree char *detail_text = NULL;
-		if (action != NULL && action[0] != '\0' && last_user_message != NULL && last_user_message[0] != '\0') {
-			detail_text = g_strdup_printf("%s\n\nLast user message: %s", action, last_user_message);
-		} else if (action != NULL && action[0] != '\0') {
-			detail_text = g_strdup(action);
-		} else if (last_user_message != NULL && last_user_message[0] != '\0') {
-			detail_text = g_strdup_printf("Last user message: %s", last_user_message);
-		}
 		if (detail_text != NULL && detail_text[0] != '\0') {
 			GtkWidget *body = gtk_label_new(detail_text);
 			gtk_widget_add_css_class(body, "detail-body");
 			gtk_label_set_xalign(GTK_LABEL(body), 0.0f);
 			gtk_label_set_wrap(GTK_LABEL(body), TRUE);
+			gtk_label_set_wrap_mode(GTK_LABEL(body), PANGO_WRAP_WORD_CHAR);
 			gtk_box_append(GTK_BOX(card_content), body);
 		}
 
@@ -545,10 +541,34 @@ static gboolean way_island_rebuild_selected_detail(const char *payload) {
 		g_signal_connect(focus_button, "clicked", G_CALLBACK(on_focus_button_click), NULL);
 		gtk_box_append(GTK_BOX(card_content), focus_button);
 
-		return TRUE;
-	}
+		if (subagent_count > 0) {
+			g_autofree gchar *subagents_title = g_strdup_printf("SUBAGENTS %d", subagent_count);
+			GtkWidget *subagents_header = gtk_label_new(subagents_title);
+			gtk_widget_add_css_class(subagents_header, "detail-section-title");
+			gtk_label_set_xalign(GTK_LABEL(subagents_header), 0.0f);
+			gtk_box_append(GTK_BOX(way_island_detail_page), subagents_header);
 
-	return FALSE;
+			GtkWidget *subagents_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
+			gtk_widget_add_css_class(subagents_box, "detail-subagents");
+			gtk_box_append(GTK_BOX(way_island_detail_page), subagents_box);
+
+			for (gint i = 1; lines[i] != NULL; i++) {
+				if (lines[i][0] == '\0') continue;
+
+				g_auto(GStrv) subagent_fields = g_strsplit(lines[i], "\t", 4);
+				if (subagent_fields[0] == NULL || subagent_fields[1] == NULL || subagent_fields[2] == NULL || subagent_fields[3] == NULL) continue;
+
+				g_autofree char *subagent_id = way_island_decode_field(subagent_fields[0]);
+				g_autofree char *subagent_name = way_island_decode_field(subagent_fields[1]);
+				g_autofree char *subagent_state_class = way_island_decode_field(subagent_fields[2]);
+				g_autofree char *subagent_detail_text = way_island_decode_field(subagent_fields[3]);
+
+				gtk_box_append(GTK_BOX(subagents_box), way_island_build_session_row(subagent_id, subagent_name, subagent_state_class, subagent_detail_text, ""));
+			}
+		}
+
+	free(detail_payload);
+	return TRUE;
 }
 
 static void way_island_rebuild_detail(const char *payload) {
@@ -557,18 +577,11 @@ static void way_island_rebuild_detail(const char *payload) {
 	if (payload == NULL || payload[0] == '\0') return;
 
 	way_island_rebuild_list(payload);
+	gint stack_view = way_island_overlay_stack_view((char *)payload, way_island_panel_view, (char *)(way_island_selected_session_id != NULL ? way_island_selected_session_id : ""));
 
-	if (way_island_panel_view == 2 && way_island_rebuild_selected_detail(payload)) {
+	if (stack_view == 2 && way_island_rebuild_selected_detail(payload)) {
 		way_island_set_stack_view(2);
 		return;
-	}
-
-	if (way_island_panel_view == 2) {
-		way_island_open_primary_detail();
-		if (way_island_rebuild_selected_detail(payload)) {
-			way_island_set_stack_view(2);
-			return;
-		}
 	}
 
 	way_island_set_stack_view(1);
@@ -577,7 +590,7 @@ static void way_island_rebuild_detail(const char *payload) {
 static void way_island_rebuild_ui(const char *payload) {
 	if (way_island_root == NULL || way_island_shell == NULL) return;
 
-	gboolean has_sessions = (payload != NULL && payload[0] != '\0');
+	gboolean has_sessions = way_island_overlay_has_sessions((char *)(payload != NULL ? payload : ""));
 
 	gtk_widget_add_css_class(way_island_shell, "island-pill");
 	if (!has_sessions) {
@@ -855,6 +868,39 @@ func buildGTKWidgetForTest(payload string, panelView int, selectedSessionID stri
 	defer C.free(unsafe.Pointer(cselected))
 
 	return unsafe.Pointer(C.way_island_test_build_widget(cpayload, C.gint(panelView), cselected))
+}
+
+//export way_island_build_pill_view_model
+func way_island_build_pill_view_model(payload *C.char) *C.char {
+	vm := buildOverlayViewModel(C.GoString(payload), panelViewClosed, "")
+	return C.CString(serializePillViewModel(vm))
+}
+
+//export way_island_build_list_view_model
+func way_island_build_list_view_model(payload *C.char) *C.char {
+	vm := buildOverlayViewModel(C.GoString(payload), panelViewList, "")
+	return C.CString(serializeListViewModel(vm))
+}
+
+//export way_island_build_detail_view_model
+func way_island_build_detail_view_model(payload *C.char, panelView C.int, selectedSessionID *C.char) *C.char {
+	vm := buildOverlayViewModel(C.GoString(payload), int(panelView), C.GoString(selectedSessionID))
+	return C.CString(serializeDetailViewModel(vm))
+}
+
+//export way_island_overlay_has_sessions
+func way_island_overlay_has_sessions(payload *C.char) C.int {
+	vm := buildOverlayViewModel(C.GoString(payload), panelViewClosed, "")
+	if vm.HasSessions {
+		return 1
+	}
+	return 0
+}
+
+//export way_island_overlay_stack_view
+func way_island_overlay_stack_view(payload *C.char, panelView C.int, selectedSessionID *C.char) C.int {
+	vm := buildOverlayViewModel(C.GoString(payload), int(panelView), C.GoString(selectedSessionID))
+	return C.int(vm.StackView)
 }
 
 //export way_island_focus_session

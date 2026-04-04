@@ -2,6 +2,8 @@ package main
 
 import (
 	"encoding/base64"
+	"encoding/json"
+	"strconv"
 	"strings"
 )
 
@@ -21,20 +23,25 @@ type sessionRowViewModel struct {
 }
 
 type pillViewModel struct {
-	Title      string
-	State      string
-	StateClass string
-	Clickable  bool
-	BadgeCount int
+	Title        string
+	State        string
+	StateClass   string
+	Clickable    bool
+	BadgeCount   int
+	WaitingCount int
+	WorkingCount int
+	OtherCount   int
 }
 
 type detailViewModel struct {
-	SessionID   string
-	Title       string
-	State       string
-	StateClass  string
-	StatusLabel string
-	BodyText    string
+	SessionID     string
+	Title         string
+	State         string
+	StateClass    string
+	StatusLabel   string
+	BodyText      string
+	SubagentCount int
+	SubagentRows  []sessionRowViewModel
 }
 
 type overlayViewModel struct {
@@ -53,6 +60,17 @@ type payloadSession struct {
 	State           string
 	Action          string
 	LastUserMessage string
+	ParentSessionID string
+	IsSubagent      bool
+	AgentNickname   string
+	Subagents       []payloadSubagent
+}
+
+type payloadSubagent struct {
+	ID          string `json:"id"`
+	Title       string `json:"title"`
+	Description string `json:"description,omitempty"`
+	State       string `json:"state,omitempty"`
 }
 
 func buildOverlayViewModel(payload string, panelView int, selectedSessionID string) overlayViewModel {
@@ -104,24 +122,31 @@ func buildPillViewModel(sessions []payloadSession) pillViewModel {
 
 	primary := sessions[0]
 	return pillViewModel{
-		Title:      primary.Name,
-		State:      primary.State,
-		StateClass: statusClass(primary.State),
-		Clickable:  true,
-		BadgeCount: len(sessions),
+		Title:        primary.Name,
+		State:        primary.State,
+		StateClass:   statusClass(primary.State),
+		Clickable:    true,
+		BadgeCount:   len(sessions),
+		WaitingCount: countSessionsByClass(sessions, "waiting"),
+		WorkingCount: countSessionsByClass(sessions, "working"),
+		OtherCount:   countSessionsByClass(sessions, "other"),
 	}
 }
 
 func buildListRowsViewModel(sessions []payloadSession) []sessionRowViewModel {
 	rows := make([]sessionRowViewModel, 0, len(sessions))
 	for _, session := range sessions {
+		detailText := actionOrStatusLabel(session.Action, session.State)
+		if subagentCount := countDirectSubagents(sessions, session.ID); subagentCount > 0 {
+			detailText += " · SUBAGENTS " + strconv.Itoa(subagentCount)
+		}
 		rows = append(rows, sessionRowViewModel{
 			SessionID:   session.ID,
 			Title:       session.Name,
 			State:       session.State,
 			StateClass:  statusClass(session.State),
 			StatusLabel: statusLabel(session.State),
-			DetailText:  actionOrStatusLabel(session.Action, session.State),
+			DetailText:  detailText,
 		})
 	}
 	return rows
@@ -137,12 +162,14 @@ func buildDetailViewModel(sessions []payloadSession, selectedSessionID string) *
 			continue
 		}
 		return &detailViewModel{
-			SessionID:   session.ID,
-			Title:       session.Name,
-			State:       session.State,
-			StateClass:  statusClass(session.State),
-			StatusLabel: statusLabel(session.State),
-			BodyText:    detailBodyText(session.Action, session.LastUserMessage),
+			SessionID:     session.ID,
+			Title:         session.Name,
+			State:         session.State,
+			StateClass:    statusClass(session.State),
+			StatusLabel:   statusLabel(session.State),
+			BodyText:      detailBodyText(session.Action, session.LastUserMessage),
+			SubagentCount: countDirectSubagents(sessions, session.ID),
+			SubagentRows:  buildSubagentRowsViewModel(sessions, session.ID),
 		}
 	}
 
@@ -161,7 +188,7 @@ func parsePayloadSessions(payload string) []payloadSession {
 			continue
 		}
 
-		fields := strings.SplitN(line, "\t", 5)
+		fields := strings.SplitN(line, "\t", 9)
 		if len(fields) < 3 {
 			continue
 		}
@@ -192,6 +219,34 @@ func parsePayloadSessions(payload string) []payloadSession {
 				lastUserMessage = decodedLastUserMessage
 			}
 		}
+		parentSessionID := ""
+		if len(fields) >= 6 {
+			decodedParentSessionID, ok := decodePayloadField(fields[5])
+			if ok {
+				parentSessionID = decodedParentSessionID
+			}
+		}
+		isSubagent := false
+		if len(fields) >= 7 {
+			decodedIsSubagent, ok := decodePayloadField(fields[6])
+			if ok {
+				isSubagent = decodedIsSubagent == "1"
+			}
+		}
+		agentNickname := ""
+		if len(fields) >= 8 {
+			decodedAgentNickname, ok := decodePayloadField(fields[7])
+			if ok {
+				agentNickname = decodedAgentNickname
+			}
+		}
+		subagents := []payloadSubagent(nil)
+		if len(fields) >= 9 {
+			decodedSubagents, ok := decodePayloadField(fields[8])
+			if ok && decodedSubagents != "" {
+				_ = json.Unmarshal([]byte(decodedSubagents), &subagents)
+			}
+		}
 
 		sessions = append(sessions, payloadSession{
 			ID:              sessionID,
@@ -199,6 +254,10 @@ func parsePayloadSessions(payload string) []payloadSession {
 			State:           state,
 			Action:          action,
 			LastUserMessage: lastUserMessage,
+			ParentSessionID: parentSessionID,
+			IsSubagent:      isSubagent,
+			AgentNickname:   agentNickname,
+			Subagents:       subagents,
 		})
 	}
 
@@ -233,6 +292,84 @@ func detailBodyText(action string, lastUserMessage string) string {
 	}
 }
 
+func buildSubagentRowsViewModel(sessions []payloadSession, parentSessionID string) []sessionRowViewModel {
+	if session, ok := findPayloadSessionByID(sessions, parentSessionID); ok && len(session.Subagents) > 0 {
+		rows := make([]sessionRowViewModel, 0, len(session.Subagents))
+		for _, subagent := range session.Subagents {
+			state := subagent.State
+			if strings.TrimSpace(state) == "" {
+				state = "idle"
+			}
+			detailText := strings.TrimSpace(subagent.Description)
+			statusText := statusLabel(state)
+			if detailText == "" {
+				detailText = statusLabel(state)
+			} else if state != "idle" {
+				detailText += " · " + statusText
+			}
+			rows = append(rows, sessionRowViewModel{
+				SessionID:   subagent.ID,
+				Title:       subagent.Title,
+				State:       state,
+				StateClass:  statusClass(state),
+				StatusLabel: statusLabel(state),
+				DetailText:  detailText,
+			})
+		}
+		return rows
+	}
+
+	rows := make([]sessionRowViewModel, 0)
+	for _, session := range sessions {
+		if session.ParentSessionID != parentSessionID {
+			continue
+		}
+		rows = append(rows, sessionRowViewModel{
+			SessionID:   session.ID,
+			Title:       subagentTitle(session),
+			State:       session.State,
+			StateClass:  statusClass(session.State),
+			StatusLabel: statusLabel(session.State),
+			DetailText:  actionOrStatusLabel(session.Action, session.State),
+		})
+	}
+	return rows
+}
+
+func countDirectSubagents(sessions []payloadSession, parentSessionID string) int {
+	if session, ok := findPayloadSessionByID(sessions, parentSessionID); ok && len(session.Subagents) > 0 {
+		return len(session.Subagents)
+	}
+
+	count := 0
+	for _, session := range sessions {
+		if session.ParentSessionID == parentSessionID {
+			count++
+		}
+	}
+	return count
+}
+
+func findPayloadSessionByID(sessions []payloadSession, sessionID string) (payloadSession, bool) {
+	for _, session := range sessions {
+		if session.ID == sessionID {
+			return session, true
+		}
+	}
+	return payloadSession{}, false
+}
+
+func subagentTitle(session payloadSession) string {
+	switch {
+	case session.AgentNickname != "":
+		return session.AgentNickname
+	case session.Name != "":
+		return session.Name
+	default:
+		return session.ID
+	}
+}
+
 func statusClass(state string) string {
 	switch state {
 	case "working":
@@ -257,4 +394,83 @@ func statusLabel(state string) string {
 	default:
 		return "Idle"
 	}
+}
+
+func countSessionsByClass(sessions []payloadSession, group string) int {
+	count := 0
+	for _, session := range sessions {
+		sessionGroup := "other"
+		switch session.State {
+		case "waiting":
+			sessionGroup = "waiting"
+		case "working":
+			sessionGroup = "working"
+		}
+		if sessionGroup == group {
+			count++
+		}
+	}
+	return count
+}
+
+func encodeViewField(value string) string {
+	return base64.StdEncoding.EncodeToString([]byte(value))
+}
+
+func serializePillViewModel(vm overlayViewModel) string {
+	fields := []string{
+		encodeViewField(vm.Pill.Title),
+		encodeViewField(vm.Pill.StateClass),
+		strconv.Itoa(boolToInt(vm.Pill.Clickable)),
+		strconv.Itoa(vm.Pill.BadgeCount),
+		strconv.Itoa(vm.Pill.WaitingCount),
+		strconv.Itoa(vm.Pill.WorkingCount),
+		strconv.Itoa(vm.Pill.OtherCount),
+	}
+	return strings.Join(fields, "\t")
+}
+
+func serializeListViewModel(vm overlayViewModel) string {
+	var lines []string
+	lines = append(lines, encodeViewField(vm.ListTitle))
+	for _, row := range vm.ListRows {
+		lines = append(lines, strings.Join([]string{
+			encodeViewField(row.SessionID),
+			encodeViewField(row.Title),
+			encodeViewField(row.StateClass),
+			encodeViewField(row.DetailText),
+		}, "\t"))
+	}
+	return strings.Join(lines, "\n")
+}
+
+func serializeDetailViewModel(vm overlayViewModel) string {
+	if vm.Detail == nil {
+		return ""
+	}
+
+	lines := []string{strings.Join([]string{
+		encodeViewField(vm.Detail.SessionID),
+		encodeViewField(vm.Detail.Title),
+		encodeViewField(vm.Detail.StateClass),
+		encodeViewField(vm.Detail.StatusLabel),
+		encodeViewField(vm.Detail.BodyText),
+		strconv.Itoa(vm.Detail.SubagentCount),
+	}, "\t")}
+	for _, row := range vm.Detail.SubagentRows {
+		lines = append(lines, strings.Join([]string{
+			encodeViewField(row.SessionID),
+			encodeViewField(row.Title),
+			encodeViewField(row.StateClass),
+			encodeViewField(row.DetailText),
+		}, "\t"))
+	}
+	return strings.Join(lines, "\n")
+}
+
+func boolToInt(value bool) int {
+	if value {
+		return 1
+	}
+	return 0
 }
