@@ -5,6 +5,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"unicode/utf8"
 
 	"github.com/ka2n/way-island/internal/socket"
 )
@@ -15,6 +16,8 @@ type overlayModel struct {
 	mu       sync.RWMutex
 	sessions map[string]socket.Session
 }
+
+const maxLastUserMessageRunes = 120
 
 func newOverlayModel() *overlayModel {
 	return &overlayModel{
@@ -65,8 +68,8 @@ func (m *overlayModel) Session(id string) (socket.Session, bool) {
 }
 
 // Payload returns a base64-encoded TSV string for the GTK UI.
-// Sessions are sorted by LastEventAt descending (most recent first).
-// Format: base64(SessionID)\tbase64(DisplayName)\tbase64(State)\n per session.
+// Sessions are sorted with waiting first, then working, then other states, then by LastEventAt descending.
+// Format: base64(SessionID)\tbase64(DisplayName)\tbase64(State)\tbase64(CurrentAction)\tbase64(LastUserMessage)\n per session.
 func (m *overlayModel) Payload() string {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -81,6 +84,11 @@ func (m *overlayModel) Payload() string {
 	}
 
 	sort.Slice(sessions, func(i, j int) bool {
+		leftPriority := sessionSortPriority(sessions[i].State)
+		rightPriority := sessionSortPriority(sessions[j].State)
+		if leftPriority != rightPriority {
+			return leftPriority < rightPriority
+		}
 		if sessions[i].LastEventAt.Equal(sessions[j].LastEventAt) {
 			return sessions[i].ID < sessions[j].ID
 		}
@@ -98,8 +106,32 @@ func (m *overlayModel) Payload() string {
 		builder.WriteString(base64.StdEncoding.EncodeToString([]byte(name)))
 		builder.WriteByte('\t')
 		builder.WriteString(base64.StdEncoding.EncodeToString([]byte(session.State)))
+		builder.WriteByte('\t')
+		builder.WriteString(base64.StdEncoding.EncodeToString([]byte(session.CurrentAction)))
+		builder.WriteByte('\t')
+		builder.WriteString(base64.StdEncoding.EncodeToString([]byte(truncateLastUserMessage(session.LastUserMessage))))
 		builder.WriteByte('\n')
 	}
 
 	return builder.String()
+}
+
+func sessionSortPriority(state socket.SessionState) int {
+	switch state {
+	case socket.SessionStateWaiting:
+		return 0
+	case socket.SessionStateWorking:
+		return 1
+	default:
+		return 2
+	}
+}
+
+func truncateLastUserMessage(message string) string {
+	if utf8.RuneCountInString(message) <= maxLastUserMessageRunes {
+		return message
+	}
+
+	runes := []rune(message)
+	return string(runes[:maxLastUserMessageRunes]) + "..."
 }
