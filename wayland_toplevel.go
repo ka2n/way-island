@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"os"
 	"path/filepath"
@@ -46,13 +47,20 @@ var (
 )
 
 func focusTerminalWindow(appID string, title string) error {
+	log.Printf("wayland focus start app_id=%s title=%q", appID, title)
 	client, err := newWaylandFocusClientFromEnv()
 	if err != nil {
+		log.Printf("wayland focus error app_id=%s title=%q err=%v", appID, title, err)
 		return err
 	}
 	defer client.Close()
 
-	return client.Focus(appID, title)
+	if err := client.Focus(appID, title); err != nil {
+		log.Printf("wayland focus error app_id=%s title=%q err=%v", appID, title, err)
+		return err
+	}
+	log.Printf("wayland focus ok app_id=%s title=%q", appID, title)
+	return nil
 }
 
 type waylandFocusClient struct {
@@ -185,6 +193,7 @@ func (c *waylandFocusClient) Focus(appID string, title string) error {
 	if target == nil {
 		return fmt.Errorf("wayland toplevel not found for app_id=%q title=%q", appID, title)
 	}
+	log.Printf("wayland focus target app_id=%s requested_title=%q matched_title=%q toplevel_id=%d seat_id=%d", appID, title, target.title, target.id, c.seatID)
 
 	if err := c.sendRequest(target.id, zwlrHandleActivateOpcode, encodeObject(c.seatID)); err != nil {
 		return err
