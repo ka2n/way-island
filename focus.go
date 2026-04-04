@@ -9,15 +9,18 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/ka2n/way-island/internal/socket"
 )
 
 const terminalAppID = "Alacritty"
 
 var (
 	errSessionNotFound = errors.New("session not found")
-	errNoClaudePID     = errors.New("session has no Claude PID")
+	errNoAgentPID      = errors.New("session has no agent PID")
 	errPaneNotFound    = errors.New("tmux pane not found")
 	errNoTmuxClient    = errors.New("tmux client not found")
+	errHostPIDNotFound = errors.New("host pid not found")
 )
 
 type focusRunner func(name string, args ...string) ([]byte, error)
@@ -29,21 +32,49 @@ type tmuxPane struct {
 	SessionName string
 	WindowName  string
 	PaneID      string
+	PaneTTY     string
 }
 
 type sessionFocuser struct {
-	store      *overlayModel
-	runCommand focusRunner
-	parentPID  parentPIDReader
-	sleep      sleepFunc
+	store                 *overlayModel
+	runCommand            focusRunner
+	focusWindow           func(appID string, title string) error
+	writeTTY              func(path string, data []byte) error
+	parentPID             parentPIDReader
+	sleep                 sleepFunc
+	readCurrentPIDNSInode func() (uint64, error)
+	readPIDNSInode        func(int) (uint64, error)
+	readStartTimeTicks    func(int) (uint64, error)
+	listProcPIDs          func() ([]int, error)
+	readNSPIDs            func(int) ([]int, error)
+	focusConfig           focusConfig
 }
 
 func newSessionFocuser(store *overlayModel) *sessionFocuser {
+	cfg, err := loadAppConfig()
+	if err != nil {
+		log.Printf("load app config: %v", err)
+	}
+
 	return &sessionFocuser{
-		store:      store,
-		runCommand: runFocusCommand,
-		parentPID:  readParentPID,
-		sleep:      time.Sleep,
+		store:                 store,
+		runCommand:            runFocusCommand,
+		focusWindow:           focusTerminalWindow,
+		writeTTY:              writeTTYBytes,
+		parentPID:             readParentPID,
+		sleep:                 time.Sleep,
+		readCurrentPIDNSInode: readCurrentPIDNamespaceInode,
+		readPIDNSInode:        readPIDNamespaceInodeForPID,
+		readStartTimeTicks: func(pid int) (uint64, error) {
+			stat, err := readProcStat(pid)
+			if err != nil {
+				return 0, err
+			}
+			return stat.StartTimeTicks, nil
+		},
+		listProcPIDs: listProcPIDs,
+		readNSPIDs:   readNSPIDsForPID,
+		focusConfig:  cfg.Focus,
 	}
 }
 
@@ -52,11 +83,16 @@ func (f *sessionFocuser) Focus(sessionID string) error {
 	if !ok {
 		return fmt.Errorf("%w: %s", errSessionNotFound, sessionID)
 	}
-	if session.ClaudePID <= 0 {
-		return fmt.Errorf("%w: %s", errNoClaudePID, sessionID)
+	if session.AgentPID <= 0 {
+		return fmt.Errorf("%w: %s", errNoAgentPID, sessionID)
 	}
 
-	pane, err := f.resolvePane(session.ClaudePID)
+	hostPID, err := f.resolveHostAgentPID(session)
+	if err != nil && !errors.Is(err, errHostPIDNotFound) {
+		return err
+	}
+
+	pane, err := f.resolvePaneForSession(session, hostPID)
 	if err != nil {
 		return err
 	}
@@ -69,12 +105,74 @@ func (f *sessionFocuser) Focus(sessionID string) error {
 		return nil
 	}
 
+	focusWindow := f.focusWindow
+	if focusWindow == nil {
+		focusWindow = focusTerminalWindow
+	}
+
+	targetTitle := preferredTerminalTitle(pane)
 	f.sleep(50 * time.Millisecond)
-	if _, err := f.runCommand("wlrctl", "toplevel", "focus", "app_id:"+terminalAppID, "title:"+pane.WindowName); err != nil {
+	if err := focusWindow(terminalAppID, targetTitle); err != nil {
+		if retryErr := f.retryFocusAfterRetitle(pane, targetTitle, focusWindow, err); retryErr == nil {
+			return nil
+		}
+
 		return fmt.Errorf("focus terminal window %q: %w", pane.WindowName, err)
 	}
 
 	return nil
+}
+
+func (f *sessionFocuser) capturePaneText(sessionID string) (string, error) {
+	session, ok := f.store.Session(sessionID)
+	if !ok {
+		return "", fmt.Errorf("%w: %s", errSessionNotFound, sessionID)
+	}
+	if session.AgentPID <= 0 {
+		return "", fmt.Errorf("%w: %s", errNoAgentPID, sessionID)
+	}
+
+	hostPID, err := f.resolveHostAgentPID(session)
+	if err != nil && !errors.Is(err, errHostPIDNotFound) {
+		return "", err
+	}
+
+	pane, err := f.resolvePaneForSession(session, hostPID)
+	if err != nil {
+		return "", err
+	}
+	if pane.PaneID == "" {
+		return "", fmt.Errorf("%w for session %q", errPaneNotFound, sessionID)
+	}
+
+	output, err := f.runCommand("tmux", "capture-pane", "-p", "-t", pane.PaneID)
+	if err != nil {
+		return "", fmt.Errorf("capture tmux pane %q: %w", pane.PaneID, err)
+	}
+	return string(output), nil
+}
+
+func (f *sessionFocuser) resolveHostAgentPID(session socket.Session) (int, error) {
+	resolver := socket.HostPIDResolver{
+		ReadCurrentPIDNSInode: f.readCurrentPIDNSInode,
+		ReadPIDNamespaceInode: f.readPIDNSInode,
+		ReadNamespacedPIDs:    f.readNSPIDs,
+		ReadStartTimeTicks:    f.readStartTimeTicks,
+		ListPIDs:              f.listProcPIDs,
+	}
+	if hostPID, ok := resolver.Resolve(session); ok {
+		return hostPID, nil
+	}
+
+	return 0, fmt.Errorf("%w: session=%s pid=%d", errHostPIDNotFound, session.ID, session.AgentPID)
+}
+
+func (f *sessionFocuser) resolvePaneForSession(session socket.Session, hostPID int) (tmuxPane, error) {
+	if pane, err := f.resolvePane(hostPID); err == nil {
+		return pane, nil
+	}
+
+	return f.resolvePaneByTTY(session)
 }
 
 func (f *sessionFocuser) resolvePane(pid int) (tmuxPane, error) {
@@ -112,7 +210,7 @@ func (f *sessionFocuser) resolvePane(pid int) (tmuxPane, error) {
 }
 
 func (f *sessionFocuser) listTmuxPanes() ([]tmuxPane, error) {
-	output, err := f.runCommand("tmux", "list-panes", "-a", "-F", "#{pane_pid}\t#{session_name}\t#{window_name}\t#{pane_id}")
+	output, err := f.runCommand("tmux", "list-panes", "-a", "-F", "#{pane_pid}\t#{session_name}\t#{window_name}\t#{pane_id}\t#{pane_tty}")
 	if err != nil {
 		return nil, fmt.Errorf("list tmux panes: %w", err)
 	}
@@ -123,8 +221,8 @@ func (f *sessionFocuser) listTmuxPanes() ([]tmuxPane, error) {
 		if strings.TrimSpace(line) == "" {
 			continue
 		}
-		fields := strings.SplitN(line, "\t", 4)
-		if len(fields) != 4 {
+		fields := strings.SplitN(line, "\t", 5)
+		if len(fields) < 4 {
 			continue
 		}
 		panePID, err := strconv.Atoi(fields[0])
@@ -136,10 +234,32 @@ func (f *sessionFocuser) listTmuxPanes() ([]tmuxPane, error) {
 			SessionName: fields[1],
 			WindowName:  fields[2],
 			PaneID:      fields[3],
+			PaneTTY:     stringField(fields, 4),
 		})
 	}
 
 	return panes, nil
+}
+
+func (f *sessionFocuser) resolvePaneByTTY(session socket.Session) (tmuxPane, error) {
+	panes, err := f.listTmuxPanes()
+	if err != nil {
+		return tmuxPane{}, err
+	}
+
+	candidates := []string{session.AgentTTY, session.HookTTY}
+	for _, candidate := range candidates {
+		if strings.TrimSpace(candidate) == "" {
+			continue
+		}
+		for _, pane := range panes {
+			if ttyMatches(candidate, pane.PaneTTY) {
+				return pane, nil
+			}
+		}
+	}
+
+	return tmuxPane{}, fmt.Errorf("%w via tty", errPaneNotFound)
 }
 
 func (f *sessionFocuser) focusTmux(pane tmuxPane) error {
@@ -182,6 +302,51 @@ func (f *sessionFocuser) listTmuxClients(sessionName string) ([]string, error) {
 	return clients, nil
 }
 
+func (f *sessionFocuser) retryFocusAfterRetitle(pane tmuxPane, title string, focusWindow func(appID string, title string) error, focusErr error) error {
+	if !f.focusConfig.RetitleWithOSC {
+		return focusErr
+	}
+	if strings.TrimSpace(pane.PaneTTY) == "" || strings.TrimSpace(title) == "" {
+		return focusErr
+	}
+	if !strings.Contains(focusErr.Error(), "wayland toplevel not found") {
+		return focusErr
+	}
+	if err := f.writeOSCWindowTitle(pane.PaneTTY, title); err != nil {
+		return err
+	}
+
+	f.sleep(50 * time.Millisecond)
+	return focusWindow(terminalAppID, title)
+}
+
+func (f *sessionFocuser) writeOSCWindowTitle(ttyPath, title string) error {
+	if f.writeTTY == nil {
+		return errors.New("tty writer unavailable")
+	}
+
+	safeTitle := sanitizeOSCTitle(title)
+	payload := []byte(fmt.Sprintf("\033]0;%s\007\033]2;%s\007", safeTitle, safeTitle))
+	if err := f.writeTTY(ttyPath, payload); err != nil {
+		return fmt.Errorf("write osc title to %q: %w", ttyPath, err)
+	}
+
+	return nil
+}
+
+func preferredTerminalTitle(pane tmuxPane) string {
+	session := strings.TrimSpace(pane.SessionName)
+	window := strings.TrimSpace(pane.WindowName)
+	switch {
+	case session != "" && window != "":
+		return session + ":" + window
+	case window != "":
+		return window
+	default:
+		return session
+	}
+}
+
 func collectAncestorPIDs(pid int, readParent parentPIDReader) (map[int]int, error) {
 	ancestors := map[int]int{}
 	current := pid
@@ -204,24 +369,11 @@ func collectAncestorPIDs(pid int, readParent parentPIDReader) (map[int]int, erro
 }
 
 func readParentPID(pid int) (int, error) {
-	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/status", pid))
+	stat, err := readProcStat(pid)
 	if err != nil {
 		return 0, err
 	}
-
-	for _, line := range strings.Split(string(data), "\n") {
-		if !strings.HasPrefix(line, "PPid:") {
-			continue
-		}
-		value := strings.TrimSpace(strings.TrimPrefix(line, "PPid:"))
-		parent, err := strconv.Atoi(value)
-		if err != nil {
-			return 0, err
-		}
-		return parent, nil
-	}
-
-	return 0, fmt.Errorf("PPid not found for pid %d", pid)
+	return stat.PPid, nil
 }
 
 func runFocusCommand(name string, args ...string) ([]byte, error) {
@@ -239,10 +391,42 @@ func runFocusCommand(name string, args ...string) ([]byte, error) {
 	return output, fmt.Errorf("%w: %s", err, trimmed)
 }
 
+func writeTTYBytes(path string, data []byte) error {
+	return os.WriteFile(path, data, 0)
+}
+
+func sanitizeOSCTitle(title string) string {
+	return strings.Map(func(r rune) rune {
+		switch r {
+		case '\a', '\x1b':
+			return -1
+		default:
+			if r < 0x20 {
+				return -1
+			}
+			return r
+		}
+	}, title)
+}
+
 func triggerSessionFocus(focuser *sessionFocuser, sessionID string) {
 	go func() {
 		if err := focuser.Focus(sessionID); err != nil {
 			log.Printf("focus session %s: %v", sessionID, err)
 		}
 	}()
+}
+
+func stringField(fields []string, index int) string {
+	if index >= len(fields) {
+		return ""
+	}
+	return fields[index]
+}
+
+func ttyMatches(a string, b string) bool {
+	if strings.TrimSpace(a) == "" || strings.TrimSpace(b) == "" {
+		return false
+	}
+	return a == b || ttyBaseName(a) == ttyBaseName(b)
 }
