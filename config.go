@@ -5,9 +5,11 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 const userStyleCSSRelativePath = "way-island/style.css"
+const userThemeCSSRelativePath = "way-island/user_style.css"
 const userConfigRelativePath = "way-island/config.json"
 
 type appConfig struct {
@@ -19,33 +21,53 @@ type focusConfig struct {
 }
 
 func loadAppCSS(defaultCSS string) (string, error) {
-	path, err := resolveUserStyleCSSPath()
+	paths, err := resolveUserCSSPaths()
 	if err != nil {
 		return defaultCSS, err
 	}
 
-	return loadAppCSSFromPath(defaultCSS, path)
+	return loadAppCSSFromPaths(defaultCSS, paths.StylePath, paths.UserStylePath)
 }
 
-func loadAppCSSFromPath(defaultCSS, path string) (string, error) {
-	userCSS, err := loadUserStyleCSS(path)
+type userCSSPaths struct {
+	StylePath     string
+	UserStylePath string
+}
+
+func loadAppCSSFromPaths(defaultCSS, stylePath, userStylePath string) (string, error) {
+	styleCSS, styleExists, err := loadOptionalCSS(stylePath)
 	if err != nil {
 		return defaultCSS, err
 	}
 
-	return mergeAppCSS(defaultCSS, userCSS), nil
+	baseCSS := defaultCSS
+	if styleExists {
+		baseCSS = styleCSS
+	}
+
+	userCSS, err := loadUserStyleCSS(userStylePath)
+	if err != nil {
+		return baseCSS, err
+	}
+
+	return mergeAppCSS(baseCSS, userCSS), nil
 }
 
 func loadUserStyleCSS(path string) (string, error) {
+	data, _, err := loadOptionalCSS(path)
+	return data, err
+}
+
+func loadOptionalCSS(path string) (string, bool, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return "", nil
+			return "", false, nil
 		}
-		return "", err
+		return "", false, err
 	}
 
-	return string(data), nil
+	return string(data), true, nil
 }
 
 func mergeAppCSS(defaultCSS, userCSS string) string {
@@ -53,7 +75,7 @@ func mergeAppCSS(defaultCSS, userCSS string) string {
 		return defaultCSS
 	}
 
-	return defaultCSS + "\n\n" + userCSS
+	return strings.TrimRight(defaultCSS, "\n") + "\n\n" + userCSS
 }
 
 func resolveUserStyleCSSPath() (string, error) {
@@ -63,6 +85,32 @@ func resolveUserStyleCSSPath() (string, error) {
 	}
 
 	return filepath.Join(configDir, userStyleCSSRelativePath), nil
+}
+
+func resolveUserThemeCSSPath() (string, error) {
+	configDir, err := os.UserConfigDir()
+	if err != nil {
+		return "", err
+	}
+
+	return filepath.Join(configDir, userThemeCSSRelativePath), nil
+}
+
+func resolveUserCSSPaths() (userCSSPaths, error) {
+	stylePath, err := resolveUserStyleCSSPath()
+	if err != nil {
+		return userCSSPaths{}, err
+	}
+
+	userStylePath, err := resolveUserThemeCSSPath()
+	if err != nil {
+		return userCSSPaths{}, err
+	}
+
+	return userCSSPaths{
+		StylePath:     stylePath,
+		UserStylePath: userStylePath,
+	}, nil
 }
 
 func loadAppConfig() (appConfig, error) {

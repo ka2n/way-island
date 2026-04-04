@@ -18,11 +18,14 @@
             gtk4
             gtk4-layer-shell
             pkg-config
+            xauth
+            xorg-server
+            wlrctl
           ];
 
           shellHook = ''
             export CGO_ENABLED=1
-            export GOFLAGS="${GOFLAGS:+$GOFLAGS }-tags=gtk4"
+            export GOFLAGS="''${GOFLAGS:+$GOFLAGS }-tags=gtk4"
           '';
         };
       });
