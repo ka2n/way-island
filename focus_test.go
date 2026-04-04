@@ -110,6 +110,7 @@ func TestSessionFocuserResolvesNearestTmuxPane(t *testing.T) {
 		{"tmux", "list-panes", "-a", "-F", "#{pane_pid}\t#{session_name}\t#{window_name}\t#{pane_id}\t#{pane_tty}"},
 		{"tmux", "list-clients", "-t", "main", "-F", "#{client_tty}"},
 		{"tmux", "switch-client", "-c", "/dev/pts/11", "-t", "%8"},
+		{"tmux", "refresh-client", "-t", "/dev/pts/11"},
 	}
 	if !reflect.DeepEqual(commands, want) {
 		t.Fatalf("commands = %#v, want %#v", commands, want)
@@ -239,6 +240,7 @@ func TestSessionFocuserFallsBackToTTYMatch(t *testing.T) {
 		{"tmux", "list-panes", "-a", "-F", "#{pane_pid}\t#{session_name}\t#{window_name}\t#{pane_id}\t#{pane_tty}"},
 		{"tmux", "list-clients", "-t", "main", "-F", "#{client_tty}"},
 		{"tmux", "switch-client", "-c", "/dev/pts/11", "-t", "%8"},
+		{"tmux", "refresh-client", "-t", "/dev/pts/11"},
 	}
 	if !reflect.DeepEqual(commands, want) {
 		t.Fatalf("commands = %#v, want %#v", commands, want)
