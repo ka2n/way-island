@@ -1,0 +1,13 @@
+[Unit]
+Description=way-island daemon
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=%h/.nix-profile/bin/way-island
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=graphical-session.target

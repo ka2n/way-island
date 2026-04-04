@@ -10,8 +10,28 @@
     flake-utils.lib.eachDefaultSystem (system:
       let
         pkgs = import nixpkgs { inherit system; };
+        way-island = pkgs.buildGoModule {
+          pname = "way-island";
+          version = "dev";
+          src = ./.;
+          nativeBuildInputs = with pkgs; [
+            pkg-config
+          ];
+          buildInputs = with pkgs; [
+            gtk4
+            gtk4-layer-shell
+          ];
+          tags = [ "gtk4" ];
+          vendorHash = "sha256-sYMfACCgaOi0M9MktRjFj2Qn+D1L1IFO2DLQLE0JAzs=";
+          postInstall = ''
+            install -Dm644 ${./packaging/systemd/user/way-island.service} \
+              $out/share/systemd/user/way-island.service
+          '';
+        };
       in
       {
+        packages.default = way-island;
+
         devShells.default = pkgs.mkShell {
           packages = with pkgs; [
             go

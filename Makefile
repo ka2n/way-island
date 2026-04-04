@@ -39,8 +39,9 @@ check: vet test build
 clean:
 	rm -f $(BINARY) coverage.out
 
-install: build
-	install -Dm755 $(BINARY) $(DESTDIR)$(PREFIX)/bin/$(BINARY)
-
-PREFIX ?= /usr/local
-DESTDIR ?=
+install:
+	-nix profile remove way-island >/dev/null 2>&1
+	nix profile install . --no-write-lock-file
+	-systemctl --user daemon-reload >/dev/null 2>&1
+	@printf '%s\n' 'Installed way-island to the current nix profile.'
+	@printf '%s\n' 'To enable the user service: systemctl --user enable --now way-island.service'
