@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/base64"
+	"encoding/json"
 	"strings"
 	"testing"
 )
@@ -29,6 +30,7 @@ func TestBuildOverlayViewModelEmptyState(t *testing.T) {
 func TestBuildOverlayViewModelListState(t *testing.T) {
 	payload := encodePayloadSessions([]payloadSession{
 		{ID: "session-1", Name: "Alpha", State: "waiting", Action: "Approval needed"},
+		{ID: "session-1-child", Name: "Alpha", State: "working", Action: "Reviewing", ParentSessionID: "session-1", IsSubagent: true, AgentNickname: "Harvey"},
 		{ID: "session-2", Name: "Beta", State: "working", Action: ""},
 	})
 
@@ -46,21 +48,49 @@ func TestBuildOverlayViewModelListState(t *testing.T) {
 	if vm.Pill.Title != "Alpha" {
 		t.Fatalf("pill title = %q, want Alpha", vm.Pill.Title)
 	}
-	if vm.Pill.BadgeCount != 2 {
-		t.Fatalf("badge count = %d, want 2", vm.Pill.BadgeCount)
+	if vm.Pill.BadgeCount != 3 {
+		t.Fatalf("badge count = %d, want 3", vm.Pill.BadgeCount)
 	}
-	if got := vm.ListRows[0].DetailText; got != "Approval needed" {
-		t.Fatalf("first row detail text = %q, want %q", got, "Approval needed")
+	if vm.Pill.WaitingCount != 1 || vm.Pill.WorkingCount != 2 || vm.Pill.OtherCount != 0 {
+		t.Fatalf("unexpected pill counts: waiting=%d working=%d other=%d", vm.Pill.WaitingCount, vm.Pill.WorkingCount, vm.Pill.OtherCount)
 	}
-	if got := vm.ListRows[1].DetailText; got != "Working" {
+	if got := vm.ListRows[0].DetailText; got != "Approval needed · SUBAGENTS 1" {
+		t.Fatalf("first row detail text = %q, want %q", got, "Approval needed · SUBAGENTS 1")
+	}
+	if got := vm.ListRows[2].DetailText; got != "Working" {
 		t.Fatalf("second row detail text = %q, want %q", got, "Working")
+	}
+}
+
+func TestBuildOverlayViewModelPrefixesClaudeDisplayName(t *testing.T) {
+	payload := encodePayloadSessions([]payloadSession{
+		{ID: "session-1", Name: "Alpha", State: "working", Action: "Running tests", HookSource: "claude"},
+		{ID: "session-2", Name: "Beta", State: "idle", Action: "", HookSource: "codex"},
+	})
+
+	vm := buildOverlayViewModel(payload, panelViewDetail, "session-1")
+
+	if vm.Pill.Title != "✳ Alpha" {
+		t.Fatalf("pill title = %q, want %q", vm.Pill.Title, "✳ Alpha")
+	}
+	if vm.ListRows[0].Title != "✳ Alpha" {
+		t.Fatalf("first row title = %q, want %q", vm.ListRows[0].Title, "✳ Alpha")
+	}
+	if vm.ListRows[1].Title != "Beta" {
+		t.Fatalf("second row title = %q, want %q", vm.ListRows[1].Title, "Beta")
+	}
+	if vm.Detail == nil {
+		t.Fatalf("expected detail view")
+	}
+	if vm.Detail.Title != "✳ Alpha" {
+		t.Fatalf("detail title = %q, want %q", vm.Detail.Title, "✳ Alpha")
 	}
 }
 
 func TestBuildOverlayViewModelDetailState(t *testing.T) {
 	payload := encodePayloadSessions([]payloadSession{
 		{ID: "session-1", Name: "Alpha", State: "working", Action: "Running tests"},
-		{ID: "session-2", Name: "Beta", State: "idle", Action: ""},
+		{ID: "session-2", Name: "Beta", State: "idle", Action: "", AgentNickname: "Builder", HookSource: "codex"},
 	})
 
 	vm := buildOverlayViewModel(payload, panelViewDetail, "session-2")
@@ -77,8 +107,32 @@ func TestBuildOverlayViewModelDetailState(t *testing.T) {
 	if vm.Detail.Title != "Beta" {
 		t.Fatalf("detail title = %q, want Beta", vm.Detail.Title)
 	}
+	if vm.Detail.Agent != "Codex" {
+		t.Fatalf("detail agent = %q, want Codex", vm.Detail.Agent)
+	}
+	if vm.Detail.AgentName != "Builder" {
+		t.Fatalf("detail agent name = %q, want Builder", vm.Detail.AgentName)
+	}
 	if vm.Detail.BodyText != "" {
 		t.Fatalf("detail body = %q", vm.Detail.BodyText)
+	}
+}
+
+func TestBuildOverlayViewModelDetailStateForClaude(t *testing.T) {
+	payload := encodePayloadSessions([]payloadSession{
+		{ID: "session-1", Name: "Alpha", State: "working", Action: "Running tests", HookSource: "claude", AgentNickname: "Ignored"},
+	})
+
+	vm := buildOverlayViewModel(payload, panelViewDetail, "session-1")
+
+	if vm.Detail == nil {
+		t.Fatalf("expected detail view")
+	}
+	if vm.Detail.Agent != "Claude Code" {
+		t.Fatalf("detail agent = %q, want Claude Code", vm.Detail.Agent)
+	}
+	if vm.Detail.AgentName != "" {
+		t.Fatalf("detail agent name = %q, want empty", vm.Detail.AgentName)
 	}
 }
 
@@ -101,6 +155,32 @@ func TestBuildOverlayViewModelDetailFallsBackToPrimarySession(t *testing.T) {
 	}
 	if vm.Detail.BodyText != "Bash: go test ./..." {
 		t.Fatalf("detail body = %q, want action text", vm.Detail.BodyText)
+	}
+}
+
+func TestBuildOverlayViewModelDetailIncludesSubagents(t *testing.T) {
+	payload := encodePayloadSessions([]payloadSession{
+		{ID: "session-1", Name: "Alpha", State: "working", Action: "Running tests", Subagents: []payloadSubagent{
+			{ID: "agent-a9a5daa5eb7af9fd8", Title: "agent-a9a5daa5eb7af9fd8", Description: "Claude latest version research", State: "tool_running"},
+			{ID: "agent-a44db7587a2a21be3", Title: "agent-a44db7587a2a21be3", Description: "Claude latest version research", State: "idle"},
+		}},
+	})
+
+	vm := buildOverlayViewModel(payload, panelViewDetail, "session-1")
+	if vm.Detail == nil {
+		t.Fatalf("expected detail view")
+	}
+	if vm.Detail.SubagentCount != 2 {
+		t.Fatalf("subagent count = %d, want 2", vm.Detail.SubagentCount)
+	}
+	if len(vm.Detail.SubagentRows) != 2 {
+		t.Fatalf("subagent rows = %d, want 2", len(vm.Detail.SubagentRows))
+	}
+	if vm.Detail.SubagentRows[0].Title != "agent-a9a5daa5eb7af9fd8" {
+		t.Fatalf("first subagent title = %q", vm.Detail.SubagentRows[0].Title)
+	}
+	if vm.Detail.SubagentRows[0].DetailText != "Claude latest version research · Running tool" {
+		t.Fatalf("first subagent detail = %q", vm.Detail.SubagentRows[0].DetailText)
 	}
 }
 
@@ -134,6 +214,24 @@ func encodePayloadSessions(sessions []payloadSession) string {
 		builder.WriteString(base64.StdEncoding.EncodeToString([]byte(session.Action)))
 		builder.WriteByte('\t')
 		builder.WriteString(base64.StdEncoding.EncodeToString([]byte(session.LastUserMessage)))
+		builder.WriteByte('\t')
+		builder.WriteString(base64.StdEncoding.EncodeToString([]byte(session.ParentSessionID)))
+		builder.WriteByte('\t')
+		if session.IsSubagent {
+			builder.WriteString(base64.StdEncoding.EncodeToString([]byte("1")))
+		} else {
+			builder.WriteString(base64.StdEncoding.EncodeToString([]byte("0")))
+		}
+		builder.WriteByte('\t')
+		builder.WriteString(base64.StdEncoding.EncodeToString([]byte(session.AgentNickname)))
+		builder.WriteByte('\t')
+		builder.WriteString(base64.StdEncoding.EncodeToString([]byte(session.HookSource)))
+		builder.WriteByte('\t')
+		subagentsJSON, err := json.Marshal(session.Subagents)
+		if err != nil {
+			panic(err)
+		}
+		builder.WriteString(base64.StdEncoding.EncodeToString(subagentsJSON))
 		builder.WriteByte('\n')
 	}
 	return builder.String()

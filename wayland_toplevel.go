@@ -210,6 +210,8 @@ func (c *waylandFocusClient) findToplevel(appID string, title string) *waylandTo
 
 	trimmedTitle := strings.TrimSpace(title)
 	if trimmedTitle != "" {
+		// Exact title matches keep the old behavior for users who already align
+		// tmux window names with terminal titles.
 		for _, candidate := range candidates {
 			if candidate.title == trimmedTitle {
 				return candidate
@@ -222,11 +224,15 @@ func (c *waylandFocusClient) findToplevel(appID string, title string) *waylandTo
 				containsMatches = append(containsMatches, candidate)
 			}
 		}
+		// A unique partial match is usually enough when the terminal title includes
+		// extra prefixes such as the tmux session name.
 		if len(containsMatches) == 1 {
 			return containsMatches[0]
 		}
 	}
 
+	// When there is only one terminal candidate, prefer focusing something
+	// plausible over failing the request outright.
 	if len(candidates) == 1 {
 		return candidates[0]
 	}
@@ -235,6 +241,8 @@ func (c *waylandFocusClient) findToplevel(appID string, title string) *waylandTo
 }
 
 func bestToplevelCandidate(candidates []*waylandToplevel, title string) *waylandToplevel {
+	// Keep fallback selection deterministic so repeated focus attempts do not hop
+	// between terminals when multiple candidates score the same.
 	var best *waylandToplevel
 	bestScore := -1
 	for _, candidate := range candidates {

@@ -12,11 +12,12 @@ import (
 
 var claudeHookEventNames = []string{"PreToolUse", "PostToolUse", "Notification", "Stop"}
 
-var codexHookEventNames = []string{"SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop"}
+var codexHookEventNames = []string{"SessionStart", "SessionEnd", "UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop"}
 
 type claudeHookEntry struct {
 	Type    string `json:"type"`
 	Command string `json:"command"`
+	Async   bool   `json:"async,omitempty"`
 }
 
 type claudeHookMatcher struct {
@@ -49,9 +50,10 @@ func runInit(args []string, stderr io.Writer) int {
 	local := fs.Bool("local", false, "Write repo-local config instead of global config")
 	claude := fs.Bool("claude", false, "Configure Claude Code hooks")
 	codex := fs.Bool("codex", false, "Configure Codex hooks")
+	debug := fs.Bool("debug", false, "Enable WAYISLAND_DEBUG=1 for installed hook commands")
 
 	if err := fs.Parse(args); err != nil {
-		_, _ = fmt.Fprintf(stderr, "usage: way-island init [--local] [--claude] [--codex]\n")
+		_, _ = fmt.Fprintf(stderr, "usage: way-island init [--local] [--claude] [--codex] [--debug]\n")
 		return 2
 	}
 
@@ -72,9 +74,9 @@ func runInit(args []string, stderr io.Writer) int {
 		var configureErr error
 		switch target.Name {
 		case "claude":
-			configureErr = configureClaude(*local, execPath)
+			configureErr = configureClaude(*local, execPath, *debug)
 		case "codex":
-			configureErr = configureCodex(*local, execPath)
+			configureErr = configureCodex(*local, execPath, *debug)
 		default:
 			configureErr = fmt.Errorf("unsupported target %q", target.Name)
 		}
@@ -104,7 +106,7 @@ func resolveInitTargets(claude, codex bool) []initTarget {
 	}
 }
 
-func configureClaude(local bool, execPath string) error {
+func configureClaude(local bool, execPath string, debug bool) error {
 	settingsPath, err := resolveClaudeSettingsPath(local)
 	if err != nil {
 		return fmt.Errorf("resolve settings path: %w", err)
@@ -120,7 +122,7 @@ func configureClaude(local bool, execPath string) error {
 		hooks = make(map[string]any)
 	}
 
-	command := execPath + " hook"
+	command := buildHookCommand(execPath+" hook --claude", debug)
 	for _, eventName := range claudeHookEventNames {
 		hooks[eventName] = ensureClaudeHookEntry(hooks[eventName], command)
 	}
@@ -134,7 +136,7 @@ func configureClaude(local bool, execPath string) error {
 	return nil
 }
 
-func configureCodex(local bool, execPath string) error {
+func configureCodex(local bool, execPath string, debug bool) error {
 	hooksPath, configPath, err := resolveCodexPaths(local)
 	if err != nil {
 		return err
@@ -145,7 +147,7 @@ func configureCodex(local bool, execPath string) error {
 		return fmt.Errorf("load hooks file: %w", err)
 	}
 
-	command := execPath + " hook"
+	command := buildHookCommand(execPath+" hook --codex", debug)
 	for _, eventName := range codexHookEventNames {
 		hooksFile.Hooks[eventName] = ensureCodexHookEntry(hooksFile.Hooks[eventName], command)
 	}
@@ -193,35 +195,82 @@ func resolveCodexPaths(local bool) (hooksPath string, configPath string, err err
 	return filepath.Join(home, ".codex", "hooks.json"), filepath.Join(home, ".codex", "config.toml"), nil
 }
 
+func buildHookCommand(command string, debug bool) string {
+	if !debug {
+		return command
+	}
+	return "WAYISLAND_DEBUG=1 " + command
+}
+
 func ensureClaudeHookEntry(existing any, command string) []claudeHookMatcher {
 	matchers := toClaudeHookMatchers(existing)
+	foundManaged := false
+	managedMatcherIndex := -1
 
-	for _, m := range matchers {
-		for _, h := range m.Hooks {
-			if h.Command == command {
-				return matchers
+	for i := range matchers {
+		filtered := matchers[i].Hooks[:0]
+		for _, h := range matchers[i].Hooks {
+			if !isManagedWayIslandHookCommand(h.Command) {
+				filtered = append(filtered, h)
+				continue
+			}
+			if !foundManaged {
+				foundManaged = true
+				managedMatcherIndex = i
 			}
 		}
+		matchers[i].Hooks = filtered
+	}
+
+	if foundManaged {
+		matchers[managedMatcherIndex].Hooks = append(matchers[managedMatcherIndex].Hooks, claudeHookEntry{
+			Type:    "command",
+			Command: command,
+			Async:   true,
+		})
+		return matchers
 	}
 
 	return append(matchers, claudeHookMatcher{
 		Matcher: "",
-		Hooks:   []claudeHookEntry{{Type: "command", Command: command}},
+		Hooks:   []claudeHookEntry{{Type: "command", Command: command, Async: true}},
 	})
 }
 
 func ensureCodexHookEntry(existing []codexHookMatcher, command string) []codexHookMatcher {
-	for _, m := range existing {
-		for _, h := range m.Hooks {
-			if h.Command == command {
-				return existing
+	foundManaged := false
+	managedMatcherIndex := -1
+
+	for i := range existing {
+		filtered := existing[i].Hooks[:0]
+		for _, h := range existing[i].Hooks {
+			if !isManagedWayIslandHookCommand(h.Command) {
+				filtered = append(filtered, h)
+				continue
+			}
+			if !foundManaged {
+				foundManaged = true
+				managedMatcherIndex = i
 			}
 		}
+		existing[i].Hooks = filtered
+	}
+
+	if foundManaged {
+		existing[managedMatcherIndex].Hooks = append(existing[managedMatcherIndex].Hooks, codexHookEntry{
+			Type:    "command",
+			Command: command,
+		})
+		return existing
 	}
 
 	return append(existing, codexHookMatcher{
 		Hooks: []codexHookEntry{{Type: "command", Command: command}},
 	})
+}
+
+func isManagedWayIslandHookCommand(command string) bool {
+	return strings.Contains(command, "way-island hook")
 }
 
 func toClaudeHookMatchers(v any) []claudeHookMatcher {

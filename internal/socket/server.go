@@ -193,21 +193,51 @@ func (s *Server) handleInspect(conn net.Conn) {
 	sessions := s.inspector.Sessions()
 
 	type sessionJSON struct {
-		ID          string `json:"id"`
-		DisplayName string `json:"display_name"`
-		State       string `json:"state"`
-		LastEventAt string `json:"last_event_at"`
-		ClaudePID   int    `json:"claude_pid,omitempty"`
+		ID                     string            `json:"id"`
+		DisplayName            string            `json:"display_name"`
+		State                  string            `json:"state"`
+		CurrentTool            string            `json:"current_tool,omitempty"`
+		CurrentAction          string            `json:"current_action,omitempty"`
+		LastUserMessage        string            `json:"last_user_message,omitempty"`
+		ParentSessionID        string            `json:"parent_session_id,omitempty"`
+		IsSubagent             bool              `json:"is_subagent,omitempty"`
+		AgentNickname          string            `json:"agent_nickname,omitempty"`
+		Subagents              []SubagentSummary `json:"subagents,omitempty"`
+		HookSource             string            `json:"hook_source,omitempty"`
+		LastEventAt            string            `json:"last_event_at"`
+		AgentPID               int               `json:"agent_pid,omitempty"`
+		ClaudePID              int               `json:"claude_pid,omitempty"`
+		AgentPIDNamespaceInode uint64            `json:"agent_pid_ns_inode,omitempty"`
+		AgentStartTimeTicks    uint64            `json:"agent_start_time_ticks,omitempty"`
+		AgentTTY               string            `json:"agent_tty,omitempty"`
+		AgentTTYNr             int64             `json:"agent_tty_nr,omitempty"`
+		HookTTY                string            `json:"hook_tty,omitempty"`
+		AgentInJail            bool              `json:"agent_in_jail,omitempty"`
 	}
 
 	result := make([]sessionJSON, 0, len(sessions))
 	for _, s := range sessions {
 		result = append(result, sessionJSON{
-			ID:          s.ID,
-			DisplayName: s.DisplayName,
-			State:       string(s.State),
-			LastEventAt: s.LastEventAt.Format("2006-01-02T15:04:05Z07:00"),
-			ClaudePID:   s.ClaudePID,
+			ID:                     s.ID,
+			DisplayName:            s.DisplayName,
+			State:                  string(s.State),
+			CurrentTool:            s.CurrentTool,
+			CurrentAction:          s.CurrentAction,
+			LastUserMessage:        s.LastUserMessage,
+			ParentSessionID:        s.ParentSessionID,
+			IsSubagent:             s.IsSubagent,
+			AgentNickname:          s.AgentNickname,
+			Subagents:              s.Subagents,
+			HookSource:             s.HookSource,
+			LastEventAt:            s.LastEventAt.Format("2006-01-02T15:04:05Z07:00"),
+			AgentPID:               s.AgentPID,
+			ClaudePID:              s.AgentPID,
+			AgentPIDNamespaceInode: s.AgentPIDNamespaceInode,
+			AgentStartTimeTicks:    s.AgentStartTimeTicks,
+			AgentTTY:               s.AgentTTY,
+			AgentTTYNr:             s.AgentTTYNr,
+			HookTTY:                s.HookTTY,
+			AgentInJail:            s.AgentInJail,
 		})
 	}
 

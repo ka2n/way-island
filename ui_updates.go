@@ -14,6 +14,8 @@ func forwardUIUpdates(ctx context.Context, updates <-chan socket.SessionUpdate, 
 	lastFlush := time.Time{}
 	var timer *time.Timer
 	var timerC <-chan time.Time
+	detectedUpdates := make(chan socket.SessionUpdate, 8)
+	detector := newApprovalPromptDetector(store, detectedUpdates)
 
 	stopTimer := func() {
 		if timer == nil {
@@ -71,6 +73,11 @@ func forwardUIUpdates(ctx context.Context, updates <-chan socket.SessionUpdate, 
 				}
 				return
 			}
+			log.Printf("session update type=%s session_id=%s state=%s reason=%s", update.Type, update.Session.ID, update.Session.State, update.Reason)
+			store.Apply(update)
+			detector.Observe(update)
+			scheduleFlush(time.Now())
+		case update := <-detectedUpdates:
 			log.Printf("session update type=%s session_id=%s state=%s reason=%s", update.Type, update.Session.ID, update.Session.State, update.Reason)
 			store.Apply(update)
 			scheduleFlush(time.Now())

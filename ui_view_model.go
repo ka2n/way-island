@@ -35,6 +35,8 @@ type pillViewModel struct {
 
 type detailViewModel struct {
 	SessionID     string
+	Agent         string
+	AgentName     string
 	Title         string
 	State         string
 	StateClass    string
@@ -63,6 +65,7 @@ type payloadSession struct {
 	ParentSessionID string
 	IsSubagent      bool
 	AgentNickname   string
+	HookSource      string
 	Subagents       []payloadSubagent
 }
 
@@ -122,7 +125,7 @@ func buildPillViewModel(sessions []payloadSession) pillViewModel {
 
 	primary := sessions[0]
 	return pillViewModel{
-		Title:        primary.Name,
+		Title:        displayName(primary),
 		State:        primary.State,
 		StateClass:   statusClass(primary.State),
 		Clickable:    true,
@@ -142,7 +145,7 @@ func buildListRowsViewModel(sessions []payloadSession) []sessionRowViewModel {
 		}
 		rows = append(rows, sessionRowViewModel{
 			SessionID:   session.ID,
-			Title:       session.Name,
+			Title:       displayName(session),
 			State:       session.State,
 			StateClass:  statusClass(session.State),
 			StatusLabel: statusLabel(session.State),
@@ -163,7 +166,9 @@ func buildDetailViewModel(sessions []payloadSession, selectedSessionID string) *
 		}
 		return &detailViewModel{
 			SessionID:     session.ID,
-			Title:         session.Name,
+			Agent:         detailAgent(session),
+			AgentName:     detailAgentName(session),
+			Title:         displayName(session),
 			State:         session.State,
 			StateClass:    statusClass(session.State),
 			StatusLabel:   statusLabel(session.State),
@@ -188,7 +193,7 @@ func parsePayloadSessions(payload string) []payloadSession {
 			continue
 		}
 
-		fields := strings.SplitN(line, "\t", 9)
+		fields := strings.SplitN(line, "\t", 10)
 		if len(fields) < 3 {
 			continue
 		}
@@ -240,9 +245,16 @@ func parsePayloadSessions(payload string) []payloadSession {
 				agentNickname = decodedAgentNickname
 			}
 		}
-		subagents := []payloadSubagent(nil)
+		hookSource := ""
 		if len(fields) >= 9 {
-			decodedSubagents, ok := decodePayloadField(fields[8])
+			decodedHookSource, ok := decodePayloadField(fields[8])
+			if ok {
+				hookSource = decodedHookSource
+			}
+		}
+		subagents := []payloadSubagent(nil)
+		if len(fields) >= 10 {
+			decodedSubagents, ok := decodePayloadField(fields[9])
 			if ok && decodedSubagents != "" {
 				_ = json.Unmarshal([]byte(decodedSubagents), &subagents)
 			}
@@ -257,6 +269,7 @@ func parsePayloadSessions(payload string) []payloadSession {
 			ParentSessionID: parentSessionID,
 			IsSubagent:      isSubagent,
 			AgentNickname:   agentNickname,
+			HookSource:      hookSource,
 			Subagents:       subagents,
 		})
 	}
@@ -368,6 +381,32 @@ func subagentTitle(session payloadSession) string {
 	default:
 		return session.ID
 	}
+}
+
+func detailAgent(session payloadSession) string {
+	switch strings.TrimSpace(session.HookSource) {
+	case "codex":
+		return "Codex"
+	case "claude":
+		return "Claude Code"
+	default:
+		return ""
+	}
+}
+
+func detailAgentName(session payloadSession) string {
+	if strings.TrimSpace(session.HookSource) != "codex" {
+		return ""
+	}
+	return strings.TrimSpace(session.AgentNickname)
+}
+
+func displayName(session payloadSession) string {
+	name := strings.TrimSpace(session.Name)
+	if detailAgent(session) == "Claude Code" && name != "" {
+		return "✳ " + name
+	}
+	return name
 }
 
 func statusClass(state string) string {

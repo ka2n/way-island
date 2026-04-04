@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/base64"
+	"encoding/json"
 	"sort"
 	"strings"
 	"sync"
@@ -69,7 +70,9 @@ func (m *overlayModel) Session(id string) (socket.Session, bool) {
 
 // Payload returns a base64-encoded TSV string for the GTK UI.
 // Sessions are sorted with waiting first, then working, then other states, then by LastEventAt descending.
-// Format: base64(SessionID)\tbase64(DisplayName)\tbase64(State)\tbase64(CurrentAction)\tbase64(LastUserMessage)\n per session.
+// Format:
+// base64(SessionID)\tbase64(DisplayName)\tbase64(State)\tbase64(CurrentAction)\tbase64(LastUserMessage)\tbase64(ParentSessionID)\tbase64(IsSubagent)\tbase64(AgentNickname)\tbase64(HookSource)\tbase64(Subagents)\n
+// per session.
 func (m *overlayModel) Payload() string {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -110,10 +113,35 @@ func (m *overlayModel) Payload() string {
 		builder.WriteString(base64.StdEncoding.EncodeToString([]byte(session.CurrentAction)))
 		builder.WriteByte('\t')
 		builder.WriteString(base64.StdEncoding.EncodeToString([]byte(truncateLastUserMessage(session.LastUserMessage))))
+		builder.WriteByte('\t')
+		builder.WriteString(base64.StdEncoding.EncodeToString([]byte(session.ParentSessionID)))
+		builder.WriteByte('\t')
+		if session.IsSubagent {
+			builder.WriteString(base64.StdEncoding.EncodeToString([]byte("1")))
+		} else {
+			builder.WriteString(base64.StdEncoding.EncodeToString([]byte("0")))
+		}
+		builder.WriteByte('\t')
+		builder.WriteString(base64.StdEncoding.EncodeToString([]byte(session.AgentNickname)))
+		builder.WriteByte('\t')
+		builder.WriteString(base64.StdEncoding.EncodeToString([]byte(session.HookSource)))
+		builder.WriteByte('\t')
+		builder.WriteString(base64.StdEncoding.EncodeToString(mustMarshalSubagents(session.Subagents)))
 		builder.WriteByte('\n')
 	}
 
 	return builder.String()
+}
+
+func mustMarshalSubagents(subagents []socket.SubagentSummary) []byte {
+	if len(subagents) == 0 {
+		return []byte("[]")
+	}
+	data, err := json.Marshal(subagents)
+	if err != nil {
+		return []byte("[]")
+	}
+	return data
 }
 
 func sessionSortPriority(state socket.SessionState) int {

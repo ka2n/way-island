@@ -110,6 +110,8 @@ func (f *sessionFocuser) Focus(sessionID string) error {
 		focusWindow = focusTerminalWindow
 	}
 
+	// Prefer a stable "session:window" title first so terminals configured with
+	// tmux-driven titles can be matched before falling back to looser heuristics.
 	targetTitle := preferredTerminalTitle(pane)
 	f.sleep(50 * time.Millisecond)
 	if err := focusWindow(terminalAppID, targetTitle); err != nil {
@@ -168,6 +170,8 @@ func (f *sessionFocuser) resolveHostAgentPID(session socket.Session) (int, error
 }
 
 func (f *sessionFocuser) resolvePaneForSession(session socket.Session, hostPID int) (tmuxPane, error) {
+	// PID ancestry is the strongest signal; tty matching keeps focus working when
+	// the agent PID cannot be resolved across namespaces.
 	if pane, err := f.resolvePane(hostPID); err == nil {
 		return pane, nil
 	}
@@ -312,6 +316,8 @@ func (f *sessionFocuser) retryFocusAfterRetitle(pane tmuxPane, title string, foc
 	if !strings.Contains(focusErr.Error(), "wayland toplevel not found") {
 		return focusErr
 	}
+	// Only rewrite the terminal title when Wayland matching failed; this keeps
+	// the OSC path as an opt-in recovery mechanism instead of the primary path.
 	if err := f.writeOSCWindowTitle(pane.PaneTTY, title); err != nil {
 		return err
 	}
@@ -396,6 +402,7 @@ func writeTTYBytes(path string, data []byte) error {
 }
 
 func sanitizeOSCTitle(title string) string {
+	// Strip control bytes so a tmux window name cannot break the OSC sequence.
 	return strings.Map(func(r rune) rune {
 		switch r {
 		case '\a', '\x1b':

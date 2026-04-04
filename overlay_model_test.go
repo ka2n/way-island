@@ -297,6 +297,26 @@ func TestOverlayModelPayloadIncludesLastUserMessage(t *testing.T) {
 	}
 }
 
+func TestOverlayModelPayloadIncludesHookSource(t *testing.T) {
+	model := newOverlayModel()
+
+	model.Apply(socket.SessionUpdate{
+		Type: socket.SessionUpdateUpsert,
+		Session: socket.Session{
+			ID:          "session-1",
+			DisplayName: "project",
+			State:       socket.SessionStateWorking,
+			HookSource:  "codex",
+			LastEventAt: time.Unix(10, 0),
+		},
+	})
+
+	fields := decodePayloadFields(t, strings.TrimSuffix(model.Payload(), "\n"))
+	if fields[8] != "codex" {
+		t.Fatalf("expected hook source in payload, got %#v", fields)
+	}
+}
+
 func TestOverlayModelPayloadTruncatesLastUserMessageByRune(t *testing.T) {
 	model := newOverlayModel()
 

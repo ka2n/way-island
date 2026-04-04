@@ -181,7 +181,8 @@ func runHook(args []string, stdin io.Reader, stderr io.Writer) int {
 	}
 
 	// Attach parent PID for terminal jump (Phase 3)
-	payload["_ppid"] = float64(os.Getppid())
+	attachAgentMetadata(payload)
+	payload["_hook_source"] = string(source)
 
 	message := socket.Message{
 		SessionID: resolvedSessionID,
@@ -200,6 +201,28 @@ func runHook(args []string, stdin io.Reader, stderr io.Writer) int {
 
 	debugf("send ok: session=%q event=%q", resolvedSessionID, event)
 	return 0
+}
+
+func attachAgentMetadata(payload map[string]any) {
+	agentPID := os.Getppid()
+	payload["_ppid"] = float64(agentPID)
+
+	if nsInode, err := readPIDNamespaceInodeForPID(agentPID); err == nil && nsInode > 0 {
+		payload["_agent_pid_ns_inode"] = float64(nsInode)
+	}
+	if stat, err := readProcStat(agentPID); err == nil {
+		payload["_agent_start_time"] = float64(stat.StartTimeTicks)
+		payload["_agent_tty_nr"] = float64(stat.TTYNr)
+	}
+	if tty := readTTYNameForPID(agentPID); tty != "" {
+		payload["_agent_tty"] = tty
+	}
+	if tty := readTTYNameForPID(os.Getpid()); tty != "" {
+		payload["_hook_tty"] = tty
+	}
+	if jaiJail := os.Getenv("JAI_JAIL"); strings.TrimSpace(jaiJail) != "" {
+		payload["_jai_jail"] = true
+	}
 }
 
 func loadHookPayload(stdin io.Reader) (map[string]any, error) {

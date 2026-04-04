@@ -43,6 +43,17 @@ func TestRunHookSendsJSONToSocket(t *testing.T) {
 	if message.Data["tool"] != "bash" {
 		t.Fatalf("unexpected data.tool: %#v", message.Data["tool"])
 	}
+	if message.Data["_hook_source"] != "claude" {
+		t.Fatalf("unexpected data._hook_source: %#v", message.Data["_hook_source"])
+	}
+	if got := message.Data["_ppid"]; got == nil {
+		t.Fatalf("expected _ppid metadata, got nil")
+	}
+	if got := message.Data["_hook_tty"]; got != nil && got != "" {
+		if _, ok := got.(string); !ok {
+			t.Fatalf("unexpected _hook_tty type: %#v", got)
+		}
+	}
 
 	shutdownHookTestServer(t, server)
 }
@@ -235,6 +246,12 @@ func TestRunHookAcceptsCodexPayloadShape(t *testing.T) {
 	if message.Data["command"] != "echo hi" {
 		t.Fatalf("unexpected data.command: %#v", message.Data["command"])
 	}
+	if message.Data["_hook_source"] != "codex" {
+		t.Fatalf("unexpected data._hook_source: %#v", message.Data["_hook_source"])
+	}
+	if _, ok := message.Data["_agent_start_time"]; !ok {
+		t.Fatalf("expected _agent_start_time metadata")
+	}
 
 	shutdownHookTestServer(t, server)
 }
@@ -264,6 +281,9 @@ func TestRunHookCanForceCodexParser(t *testing.T) {
 	}
 	if message.Data["command"] != "pwd" {
 		t.Fatalf("unexpected data.command: %#v", message.Data["command"])
+	}
+	if message.Data["_hook_source"] != "codex" {
+		t.Fatalf("unexpected data._hook_source: %#v", message.Data["_hook_source"])
 	}
 
 	shutdownHookTestServer(t, server)

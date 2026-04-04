@@ -2,13 +2,17 @@ package socket
 
 import (
 	"context"
+	"fmt"
+	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
 )
 
-const DefaultSessionTimeout = 30 * time.Second
+const DefaultSessionTimeout = 5 * time.Minute
 
 type SessionState string
 
@@ -20,11 +24,25 @@ const (
 )
 
 type Session struct {
-	ID          string
-	DisplayName string
-	State       SessionState
-	LastEventAt time.Time
-	ClaudePID   int // PID of the Claude Code process (from hooks)
+	ID                     string
+	DisplayName            string
+	State                  SessionState
+	CurrentTool            string
+	CurrentAction          string
+	LastUserMessage        string
+	ParentSessionID        string
+	IsSubagent             bool
+	AgentNickname          string
+	Subagents              []SubagentSummary
+	HookSource             string
+	LastEventAt            time.Time
+	AgentPID               int // PID of the agent process as seen from the hook namespace
+	AgentPIDNamespaceInode uint64
+	AgentStartTimeTicks    uint64
+	AgentTTY               string
+	AgentTTYNr             int64
+	HookTTY                string
+	AgentInJail            bool
 }
 
 type SessionUpdateType string
@@ -47,6 +65,91 @@ type SessionManager struct {
 	now      func() time.Time
 	updates  chan SessionUpdate
 }
+
+type procStat struct {
+	StartTimeTicks uint64
+}
+
+var (
+	isProcessAliveFunc = func(pid int) bool {
+		return syscall.Kill(pid, 0) == nil
+	}
+	listProcPIDsForLiveness = func() ([]int, error) {
+		entries, err := os.ReadDir("/proc")
+		if err != nil {
+			return nil, err
+		}
+
+		pids := make([]int, 0, len(entries))
+		for _, entry := range entries {
+			if !entry.IsDir() {
+				continue
+			}
+			pid, err := strconv.Atoi(entry.Name())
+			if err != nil {
+				continue
+			}
+			pids = append(pids, pid)
+		}
+		return pids, nil
+	}
+	readPIDNamespaceInodeForLiveness = func(pid int) (uint64, error) {
+		info, err := os.Stat(fmt.Sprintf("/proc/%d/ns/pid", pid))
+		if err != nil {
+			return 0, err
+		}
+		stat, ok := info.Sys().(*syscall.Stat_t)
+		if !ok {
+			return 0, fmt.Errorf("unexpected stat type for pid namespace %d", pid)
+		}
+		return stat.Ino, nil
+	}
+	readNSPIDsForLiveness = func(pid int) ([]int, error) {
+		data, err := os.ReadFile(fmt.Sprintf("/proc/%d/status", pid))
+		if err != nil {
+			return nil, err
+		}
+
+		for _, line := range strings.Split(string(data), "\n") {
+			if !strings.HasPrefix(line, "NSpid:") {
+				continue
+			}
+			raw := strings.Fields(strings.TrimSpace(strings.TrimPrefix(line, "NSpid:")))
+			pids := make([]int, 0, len(raw))
+			for _, value := range raw {
+				pidValue, err := strconv.Atoi(value)
+				if err != nil {
+					return nil, err
+				}
+				pids = append(pids, pidValue)
+			}
+			return pids, nil
+		}
+
+		return nil, fmt.Errorf("NSpid not found for pid %d", pid)
+	}
+	readProcStatForLiveness = func(pid int) (procStat, error) {
+		data, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
+		if err != nil {
+			return procStat{}, err
+		}
+
+		text := strings.TrimSpace(string(data))
+		closeIdx := strings.LastIndex(text, ")")
+		if closeIdx == -1 || closeIdx+2 >= len(text) {
+			return procStat{}, fmt.Errorf("unexpected stat format for pid %d", pid)
+		}
+		fields := strings.Fields(text[closeIdx+2:])
+		if len(fields) < 20 {
+			return procStat{}, fmt.Errorf("unexpected stat field count for pid %d", pid)
+		}
+		startTimeTicks, err := strconv.ParseUint(fields[19], 10, 64)
+		if err != nil {
+			return procStat{}, err
+		}
+		return procStat{StartTimeTicks: startTimeTicks}, nil
+	}
+)
 
 func NewSessionManager(timeout time.Duration) *SessionManager {
 	if timeout <= 0 {
@@ -78,13 +181,53 @@ func (m *SessionManager) HandleMessage(message Message) {
 
 	m.mu.Lock()
 	existing := m.sessions[message.SessionID]
+	hookSource := resolveString(existing.HookSource, message.Data, "_hook_source")
+	isSubagent := existing.IsSubagent
+	parentSessionID := existing.ParentSessionID
+	agentNickname := existing.AgentNickname
+	subagents := existing.Subagents
 	session := Session{
-		ID:          message.SessionID,
-		DisplayName: resolveDisplayName(existing.DisplayName, message.Data),
-		State:       state,
-		LastEventAt: m.now(),
-		ClaudePID:   resolveClaudePID(existing.ClaudePID, message.Data),
+		ID:                     message.SessionID,
+		DisplayName:            resolveDisplayName(existing.DisplayName, message.Data),
+		State:                  state,
+		CurrentTool:            resolveCurrentTool(existing.CurrentTool, message.Event, message.Data),
+		CurrentAction:          resolveCurrentAction(existing.CurrentAction, message.Event, message.Data),
+		LastUserMessage:        resolveLastUserMessage(existing.LastUserMessage, message.Data),
+		ParentSessionID:        parentSessionID,
+		IsSubagent:             isSubagent,
+		AgentNickname:          agentNickname,
+		Subagents:              subagents,
+		HookSource:             hookSource,
+		LastEventAt:            m.now(),
+		AgentPID:               resolveAgentPID(existing.AgentPID, message.Data),
+		AgentPIDNamespaceInode: resolveUint64(existing.AgentPIDNamespaceInode, message.Data, "_agent_pid_ns_inode"),
+		AgentStartTimeTicks:    resolveUint64(existing.AgentStartTimeTicks, message.Data, "_agent_start_time"),
+		AgentTTY:               resolveString(existing.AgentTTY, message.Data, "_agent_tty"),
+		AgentTTYNr:             resolveInt64(existing.AgentTTYNr, message.Data, "_agent_tty_nr"),
+		HookTTY:                resolveString(existing.HookTTY, message.Data, "_hook_tty"),
+		AgentInJail:            resolveBool(existing.AgentInJail, message.Data, "_jai_jail"),
 	}
+	if hookSource == "codex" && shouldEnrichCodexSessionMetadata(existing, session) {
+		if metadata, ok := readCodexSessionMetadataFunc(message.SessionID); ok {
+			if session.ParentSessionID == "" {
+				session.ParentSessionID = metadata.ParentSessionID
+			}
+			if session.AgentNickname == "" {
+				session.AgentNickname = metadata.AgentNickname
+			}
+			if metadata.IsSubagent {
+				session.IsSubagent = true
+			}
+		}
+	}
+	if hookSource == "claude" && shouldEnrichClaudeSessionMetadata(existing, session) {
+		if metadata, ok := readClaudeSessionMetadataFunc(message.SessionID, firstString(message.Data, "cwd")); ok {
+			if len(metadata.Subagents) > 0 {
+				session.Subagents = metadata.Subagents
+			}
+		}
+	}
+	session.State = adjustSessionState(message.Event, session.State, session.IsSubagent)
 	m.sessions[message.SessionID] = session
 	m.mu.Unlock()
 
@@ -93,6 +236,27 @@ func (m *SessionManager) HandleMessage(message Message) {
 		Session: session,
 		Reason:  "hook:" + message.Event,
 	})
+}
+
+func adjustSessionState(event string, state SessionState, isSubagent bool) SessionState {
+	if event == string(SessionStateIdle) && state == SessionStateIdle && !isSubagent {
+		return SessionStateWaiting
+	}
+	return state
+}
+
+func shouldEnrichCodexSessionMetadata(existing Session, current Session) bool {
+	if current.IsSubagent || strings.TrimSpace(current.ParentSessionID) != "" {
+		return false
+	}
+	if strings.TrimSpace(current.AgentNickname) != "" && strings.TrimSpace(existing.ParentSessionID) != "" {
+		return false
+	}
+	return true
+}
+
+func shouldEnrichClaudeSessionMetadata(existing Session, current Session) bool {
+	return strings.TrimSpace(current.HookSource) == "claude"
 }
 
 func (m *SessionManager) removeSession(sessionID string, reason string) {
@@ -154,7 +318,7 @@ func (m *SessionManager) pruneExpired(now time.Time) {
 		if now.Sub(session.LastEventAt) < m.timeout {
 			continue
 		}
-		if session.ClaudePID > 0 && isProcessAlive(session.ClaudePID) {
+		if session.AgentPID > 0 && isSessionProcessAlive(session) {
 			continue
 		}
 
@@ -191,17 +355,168 @@ func resolveDisplayName(existing string, data map[string]any) string {
 	return existing
 }
 
-// resolveClaudePID extracts the Claude Code PID from hook payload.
+// resolveAgentPID extracts the agent PID from hook payload.
 // The _ppid field is set by the hook process using os.Getppid().
-func resolveClaudePID(existing int, data map[string]any) int {
+func resolveAgentPID(existing int, data map[string]any) int {
 	if ppid, ok := data["_ppid"].(float64); ok && ppid > 0 {
 		return int(ppid)
 	}
 	return existing
 }
 
+func resolveUint64(existing uint64, data map[string]any, key string) uint64 {
+	if value, ok := data[key].(float64); ok && value > 0 {
+		return uint64(value)
+	}
+	return existing
+}
+
+func resolveInt64(existing int64, data map[string]any, key string) int64 {
+	if value, ok := data[key].(float64); ok {
+		return int64(value)
+	}
+	return existing
+}
+
+func resolveString(existing string, data map[string]any, keys ...string) string {
+	for _, key := range keys {
+		if value, ok := data[key].(string); ok && value != "" {
+			return value
+		}
+	}
+	return existing
+}
+
+func resolveBool(existing bool, data map[string]any, key string) bool {
+	if value, ok := data[key].(bool); ok {
+		return value
+	}
+	return existing
+}
+
+func resolveCurrentAction(existing string, event string, data map[string]any) string {
+	switch event {
+	case "tool_start", string(SessionStateToolRunning):
+		// Codex currently does not expose a distinct approval-request hook/event,
+		// so PreToolUse is the closest external signal for "about to block on
+		// approval". Track upstream: openai/codex#15311, #16301, #16484.
+		toolName := strings.TrimSpace(resolveString("", data, "tool_name", "tool"))
+		command := strings.TrimSpace(resolveString("", data, "command"))
+		switch {
+		case toolName != "" && command != "":
+			return toolName + ": " + command
+		case toolName != "":
+			return toolName
+		case command != "":
+			return command
+		default:
+			return existing
+		}
+	case "tool_end", string(SessionStateWorking), string(SessionStateWaiting), string(SessionStateIdle), "session_start", "response":
+		return ""
+	default:
+		return existing
+	}
+}
+
+func resolveCurrentTool(existing string, event string, data map[string]any) string {
+	switch event {
+	case "tool_start", string(SessionStateToolRunning):
+		return normalizeToolName(resolveString(existing, data, "tool", "tool_name"))
+	case "tool_end", string(SessionStateWorking), string(SessionStateWaiting), string(SessionStateIdle), "session_start", "response":
+		return ""
+	default:
+		return existing
+	}
+}
+
+func resolveLastUserMessage(existing string, data map[string]any) string {
+	if !isUserPromptSubmit(data) {
+		return existing
+	}
+
+	text := strings.TrimSpace(firstNonEmptyString(
+		firstString(data, "prompt", "user_prompt", "userPrompt", "text"),
+		firstNestedString(data, "prompt", "text", "content"),
+		firstNestedString(data, "message", "text", "content"),
+	))
+	if text == "" {
+		return existing
+	}
+
+	text = strings.Join(strings.Fields(text), " ")
+	if len(text) > 140 {
+		text = text[:137] + "..."
+	}
+	return text
+}
+
+func isUserPromptSubmit(data map[string]any) bool {
+	eventName := strings.TrimSpace(resolveString("", data, "hook_event_name", "hookEventName"))
+	return eventName == "UserPromptSubmit"
+}
+
+func firstString(data map[string]any, keys ...string) string {
+	for _, key := range keys {
+		value, ok := data[key].(string)
+		if ok && strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func firstNestedString(data map[string]any, parent string, keys ...string) string {
+	value, ok := data[parent].(map[string]any)
+	if !ok {
+		return ""
+	}
+	return firstString(value, keys...)
+}
+
+func firstNonEmptyString(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func normalizeToolName(name string) string {
+	return strings.ToLower(strings.TrimSpace(name))
+}
+
 func isProcessAlive(pid int) bool {
-	return syscall.Kill(pid, 0) == nil
+	return isProcessAliveFunc(pid)
+}
+
+func isSessionProcessAlive(session Session) bool {
+	if session.AgentPID <= 0 {
+		return false
+	}
+
+	resolver := HostPIDResolver{
+		ReadPIDNamespaceInode: readPIDNamespaceInodeForLiveness,
+		ReadNamespacedPIDs:    readNSPIDsForLiveness,
+		ReadStartTimeTicks: func(pid int) (uint64, error) {
+			stat, err := readProcStatForLiveness(pid)
+			if err != nil {
+				return 0, err
+			}
+			return stat.StartTimeTicks, nil
+		},
+		ListPIDs: listProcPIDsForLiveness,
+	}
+	if hostPID, ok := resolver.Resolve(session); ok {
+		return isProcessAlive(hostPID)
+	}
+
+	if session.AgentInJail || session.AgentPIDNamespaceInode > 0 && session.AgentPID < 100 {
+		return false
+	}
+
+	return isProcessAlive(session.AgentPID)
 }
 
 func sessionStateFromEvent(event string) (SessionState, bool) {
