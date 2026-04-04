@@ -2,918 +2,726 @@
 
 package main
 
-/*
-#cgo pkg-config: gtk4 gtk4-layer-shell-0
-
-#include <gtk/gtk.h>
-#include <gtk4-layer-shell.h>
-#include <glib.h>
-#include <stdlib.h>
-#include <string.h>
-
-extern void way_island_focus_session(char *session_id);
-extern char* way_island_build_pill_view_model(char *payload);
-extern char* way_island_build_list_view_model(char *payload);
-extern char* way_island_build_detail_view_model(char *payload, int panel_view, char *selected_session_id);
-extern int way_island_overlay_has_sessions(char *payload);
-extern int way_island_overlay_stack_view(char *payload, int panel_view, char *selected_session_id);
-
-static GtkApplication *way_island_app = NULL;
-static GtkWidget *way_island_shell = NULL;
-static GtkWidget *way_island_root = NULL;
-static GtkWidget *way_island_pill = NULL;
-static GtkWidget *way_island_revealer = NULL;
-static GtkWidget *way_island_stack = NULL;
-static GtkWidget *way_island_list_page = NULL;
-static GtkWidget *way_island_detail_page = NULL;
-static gchar *way_island_sessions_payload = NULL;
-static gchar *way_island_selected_session_id = NULL;
-static gchar *way_island_css_data = NULL;
-static GtkCssProvider *way_island_css_provider = NULL;
-static gboolean way_island_should_quit = FALSE;
-static gint way_island_panel_view = 0;
-static gint way_island_stack_view = 1;
-static gint way_island_pending_panel_view = -1;
-static guint way_island_panel_update_source_id = 0;
-static guint way_island_hover_close_source_id = 0;
-static const guint WAY_ISLAND_HOVER_CLOSE_DELAY_MS = 160;
-
-static const char *way_island_session_group(const char *state) {
-	if (g_strcmp0(state, "waiting") == 0) return "waiting";
-	if (g_strcmp0(state, "working") == 0) return "working";
-	return "other";
-}
-
-static GtkWidget *way_island_build_count_badge(const char *group, gint count) {
-	GtkWidget *badge = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
-	gtk_widget_add_css_class(badge, "island-count-badge");
-
-	GtkWidget *square = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
-	gtk_widget_add_css_class(square, "island-count-square");
-	gtk_widget_add_css_class(square, group);
-	gtk_box_append(GTK_BOX(badge), square);
-
-	g_autofree gchar *count_text = g_strdup_printf("%d", count);
-	GtkWidget *label = gtk_label_new(count_text);
-	gtk_widget_add_css_class(label, "island-count-label");
-	gtk_widget_set_valign(label, GTK_ALIGN_CENTER);
-	gtk_box_append(GTK_BOX(badge), label);
-
-	return badge;
-}
-
-GtkWidget *way_island_shell_new(void);
-void way_island_shell_set_child(GtkWidget *shell, GtkWidget *child);
-
-static void way_island_rebuild_ui(const char *payload);
-static void way_island_schedule_panel_view(gint panel_view);
-static GtkWidget *way_island_build_shell_widget(void);
-static void way_island_set_stack_view(gint panel_view);
-static void way_island_cancel_hover_close(void);
-static void way_island_close_panel(void);
-
-static gboolean way_island_close_panel_timeout(gpointer user_data) {
-	(void)user_data;
-
-	way_island_hover_close_source_id = 0;
-	way_island_close_panel();
-	return G_SOURCE_REMOVE;
-}
-
-static void way_island_cancel_hover_close(void) {
-	if (way_island_hover_close_source_id == 0) return;
-
-	g_source_remove(way_island_hover_close_source_id);
-	way_island_hover_close_source_id = 0;
-}
-
-static void on_revealer_child_revealed_changed(GObject *object, GParamSpec *pspec, gpointer user_data) {
-	(void)pspec;
-	(void)user_data;
-
-	GtkRevealer *revealer = GTK_REVEALER(object);
-	if (gtk_revealer_get_reveal_child(revealer)) return;
-	if (gtk_revealer_get_child_revealed(revealer)) return;
-
-	gtk_widget_set_visible(GTK_WIDGET(revealer), FALSE);
-	if (way_island_stack != NULL) {
-		way_island_set_stack_view(1);
-	}
-	if (way_island_shell != NULL) {
-		gtk_widget_queue_resize(way_island_shell);
-	}
-}
-
-static void way_island_set_stack_view(gint panel_view) {
-	if (way_island_stack == NULL) return;
-
-	if (panel_view == 2) {
-		if (way_island_stack_view != 2) {
-			gtk_stack_set_transition_type(GTK_STACK(way_island_stack), GTK_STACK_TRANSITION_TYPE_SLIDE_LEFT);
-		}
-		gtk_stack_set_visible_child_name(GTK_STACK(way_island_stack), "detail");
-		way_island_stack_view = 2;
-		return;
-	}
-
-	if (way_island_stack_view != 1) {
-		gtk_stack_set_transition_type(GTK_STACK(way_island_stack), GTK_STACK_TRANSITION_TYPE_SLIDE_RIGHT);
-	}
-	gtk_stack_set_visible_child_name(GTK_STACK(way_island_stack), "list");
-	way_island_stack_view = 1;
-}
-
-static gboolean apply_panel_view_idle(gpointer user_data) {
-	gint panel_view = GPOINTER_TO_INT(user_data);
-	way_island_panel_update_source_id = 0;
-	way_island_pending_panel_view = -1;
-
-	if (way_island_panel_view == panel_view) return G_SOURCE_REMOVE;
-
-	way_island_panel_view = panel_view;
-	way_island_rebuild_ui(way_island_sessions_payload);
-
-	return G_SOURCE_REMOVE;
-}
-
-static void way_island_schedule_panel_view(gint panel_view) {
-	if (way_island_pending_panel_view == panel_view) return;
-
-	way_island_pending_panel_view = panel_view;
-	if (way_island_panel_update_source_id != 0) {
-		g_source_remove(way_island_panel_update_source_id);
-	}
-
-	way_island_panel_update_source_id = g_idle_add_full(
-		G_PRIORITY_DEFAULT,
-		apply_panel_view_idle,
-		GINT_TO_POINTER(panel_view),
-		NULL
-	);
-}
-
-static char *way_island_decode_field(const char *encoded) {
-	gsize decoded_len = 0;
-	guchar *decoded = g_base64_decode(encoded, &decoded_len);
-	char *text = g_malloc(decoded_len + 1);
-
-	memcpy(text, decoded, decoded_len);
-	text[decoded_len] = '\0';
-	g_free(decoded);
-
-	return text;
-}
-
-static void way_island_clear_children(GtkWidget *widget) {
-	GtkWidget *child = gtk_widget_get_first_child(widget);
-	while (child != NULL) {
-		GtkWidget *next = gtk_widget_get_next_sibling(child);
-		gtk_box_remove(GTK_BOX(widget), child);
-		child = next;
-	}
-}
-
-static const char *way_island_status_class(const char *state) {
-	if (g_strcmp0(state, "working") == 0) return "working";
-	if (g_strcmp0(state, "tool_running") == 0) return "tool-running";
-	if (g_strcmp0(state, "waiting") == 0) return "waiting";
-	return "idle";
-}
-
-static const char *way_island_status_label(const char *state) {
-	if (g_strcmp0(state, "working") == 0) return "Working";
-	if (g_strcmp0(state, "tool_running") == 0) return "Running tool";
-	if (g_strcmp0(state, "waiting") == 0) return "Waiting";
-	return "Idle";
-}
-
-static gint way_island_count_sessions(const char *payload) {
-	gint count = 0;
-	if (payload == NULL || payload[0] == '\0') return 0;
-	for (const char *p = payload; *p; p++) {
-		if (*p == '\n') count++;
-	}
-	return count;
-}
-
-static gchar *way_island_primary_session_id(const char *payload) {
-	if (payload == NULL || payload[0] == '\0') return NULL;
-
-	g_auto(GStrv) lines = g_strsplit(payload, "\n", -1);
-	if (lines[0] == NULL || lines[0][0] == '\0') return NULL;
-
-	g_auto(GStrv) fields = g_strsplit(lines[0], "\t", 4);
-	if (fields[0] == NULL) return NULL;
-
-	return way_island_decode_field(fields[0]);
-}
-
-static void way_island_open_detail(const char *session_id) {
-	if (session_id == NULL || session_id[0] == '\0') return;
-
-	way_island_cancel_hover_close();
-	g_free(way_island_selected_session_id);
-	way_island_selected_session_id = g_strdup(session_id);
-	way_island_schedule_panel_view(2);
-}
-
-static void way_island_open_primary_detail(void) {
-	g_autofree gchar *session_id = way_island_primary_session_id(way_island_sessions_payload);
-	if (session_id == NULL) return;
-
-	way_island_open_detail(session_id);
-}
-
-static void way_island_open_list(void) {
-	if (way_island_sessions_payload == NULL || way_island_sessions_payload[0] == '\0') return;
-	way_island_cancel_hover_close();
-	way_island_schedule_panel_view(1);
-}
-
-static void way_island_close_panel(void) {
-	way_island_cancel_hover_close();
-	way_island_schedule_panel_view(0);
-}
-
-static void on_session_row_click(GtkGestureClick *gesture, gint n_press, gdouble x, gdouble y, gpointer user_data) {
-	(void)n_press; (void)x; (void)y; (void)user_data;
-	GtkWidget *widget = gtk_event_controller_get_widget(GTK_EVENT_CONTROLLER(gesture));
-	char *session_id = g_object_get_data(G_OBJECT(widget), "way-island-session-id");
-	if (session_id == NULL || session_id[0] == '\0') return;
-	way_island_open_detail(session_id);
-}
-
-static GtkWidget *way_island_build_session_row(const char *session_id, const char *name, const char *state, const char *action, const char *last_user_message) {
-	GtkWidget *row_shell = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
-	gtk_widget_add_css_class(row_shell, "session-row-shell");
-
-	GtkWidget *row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
-	gtk_widget_add_css_class(row, "session-row");
-	gtk_box_append(GTK_BOX(row_shell), row);
-	if (last_user_message != NULL && last_user_message[0] != '\0') {
-		gtk_widget_set_tooltip_text(row_shell, last_user_message);
-		gtk_widget_set_tooltip_text(row, last_user_message);
-	}
-
-	GtkGesture *click = gtk_gesture_click_new();
-	g_object_set_data_full(G_OBJECT(row), "way-island-session-id", g_strdup(session_id), g_free);
-	g_signal_connect(click, "released", G_CALLBACK(on_session_row_click), NULL);
-	gtk_widget_add_controller(row, GTK_EVENT_CONTROLLER(click));
-
-	GtkWidget *dot = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
-	gtk_widget_add_css_class(dot, "island-status");
-	gtk_widget_add_css_class(dot, state);
-	gtk_widget_set_valign(dot, GTK_ALIGN_CENTER);
-	gtk_box_append(GTK_BOX(row), dot);
-
-	GtkWidget *text_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
-	gtk_widget_set_hexpand(text_box, TRUE);
-
-	GtkWidget *title = gtk_label_new(name);
-	gtk_widget_add_css_class(title, "session-row-title");
-	gtk_label_set_xalign(GTK_LABEL(title), 0.0f);
-	gtk_label_set_ellipsize(GTK_LABEL(title), PANGO_ELLIPSIZE_END);
-	gtk_label_set_max_width_chars(GTK_LABEL(title), 30);
-	gtk_box_append(GTK_BOX(text_box), title);
-
-	const char *detail_text = (action != NULL && action[0] != '\0') ? action : way_island_status_label(state);
-	GtkWidget *status_label = gtk_label_new(detail_text);
-	gtk_widget_add_css_class(status_label, "session-row-status");
-	gtk_label_set_xalign(GTK_LABEL(status_label), 0.0f);
-	gtk_label_set_ellipsize(GTK_LABEL(status_label), PANGO_ELLIPSIZE_END);
-	gtk_label_set_max_width_chars(GTK_LABEL(status_label), 48);
-	gtk_box_append(GTK_BOX(text_box), status_label);
-
-	gtk_box_append(GTK_BOX(row), text_box);
-
-	GtkWidget *chevron = gtk_image_new_from_icon_name("go-next-symbolic");
-	gtk_widget_add_css_class(chevron, "session-row-chevron");
-	gtk_widget_set_valign(chevron, GTK_ALIGN_CENTER);
-	gtk_box_append(GTK_BOX(row), chevron);
-
-	return row_shell;
-}
-
-static void on_primary_click(GtkGestureClick *gesture, gint n_press, gdouble x, gdouble y, gpointer user_data) {
-	(void)gesture; (void)n_press; (void)x; (void)y; (void)user_data;
-	way_island_open_primary_detail();
-}
-
-static void on_back_click(GtkGestureClick *gesture, gint n_press, gdouble x, gdouble y, gpointer user_data) {
-	(void)gesture; (void)n_press; (void)x; (void)y; (void)user_data;
-	way_island_schedule_panel_view(1);
-}
-
-static void on_focus_button_click(GtkButton *button, gpointer user_data) {
-	(void)button; (void)user_data;
-
-	GtkWidget *widget = GTK_WIDGET(button);
-	char *session_id = g_object_get_data(G_OBJECT(widget), "way-island-session-id");
-	if (session_id == NULL || session_id[0] == '\0') return;
-	way_island_close_panel();
-	way_island_focus_session(session_id);
-}
-
-static void on_hover_enter(GtkEventControllerMotion *controller, double x, double y, gpointer user_data) {
-	(void)controller; (void)x; (void)y; (void)user_data;
-
-	way_island_cancel_hover_close();
-	if (way_island_sessions_payload == NULL || way_island_sessions_payload[0] == '\0') return;
-	if (way_island_panel_view != 0) return;
-
-	way_island_open_list();
-}
-
-static void on_hover_leave(GtkEventControllerMotion *controller, gpointer user_data) {
-	(void)controller; (void)user_data;
-	if (way_island_panel_view == 0) return;
-
-	way_island_cancel_hover_close();
-	way_island_hover_close_source_id = g_timeout_add(
-		WAY_ISLAND_HOVER_CLOSE_DELAY_MS,
-		way_island_close_panel_timeout,
-		NULL
-	);
-}
-
-static void way_island_rebuild_pill(const char *payload) {
-	if (way_island_pill == NULL) return;
-
-	way_island_clear_children(way_island_pill);
-	char *pill_payload = way_island_build_pill_view_model((char *)(payload != NULL ? payload : ""));
-	g_auto(GStrv) fields = g_strsplit(pill_payload, "\t", 7);
-	if (fields[0] == NULL || fields[1] == NULL || fields[2] == NULL || fields[3] == NULL || fields[4] == NULL || fields[5] == NULL || fields[6] == NULL) {
-		free(pill_payload);
-		return;
-	}
-
-	g_autofree char *primary_name = way_island_decode_field(fields[0]);
-	g_autofree char *primary_state_class = way_island_decode_field(fields[1]);
-	gboolean clickable = (g_strcmp0(fields[2], "1") == 0);
-	gint session_count = (gint)g_ascii_strtoll(fields[3], NULL, 10);
-	gint waiting_count = (gint)g_ascii_strtoll(fields[4], NULL, 10);
-	gint working_count = (gint)g_ascii_strtoll(fields[5], NULL, 10);
-	gint other_count = (gint)g_ascii_strtoll(fields[6], NULL, 10);
-
-	GtkWidget *status = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
-	gtk_widget_add_css_class(status, "island-status");
-	gtk_widget_add_css_class(status, primary_state_class);
-	gtk_widget_set_valign(status, GTK_ALIGN_CENTER);
-
-	GtkWidget *summary = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
-	gtk_widget_add_css_class(summary, "island-summary");
-	gtk_widget_set_hexpand(summary, TRUE);
-	if (clickable) {
-		GtkGesture *click = gtk_gesture_click_new();
-		g_signal_connect(click, "released", G_CALLBACK(on_primary_click), NULL);
-		gtk_widget_add_controller(summary, GTK_EVENT_CONTROLLER(click));
-	}
-
-	GtkWidget *summary_content = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
-	gtk_widget_add_css_class(summary_content, "island-summary-content");
-	gtk_box_append(GTK_BOX(summary), summary_content);
-	gtk_box_append(GTK_BOX(summary_content), status);
-
-	GtkWidget *title = gtk_label_new(primary_name);
-	gtk_widget_add_css_class(title, "island-title");
-	gtk_widget_set_hexpand(title, TRUE);
-	gtk_widget_set_halign(title, GTK_ALIGN_FILL);
-	gtk_widget_set_valign(title, GTK_ALIGN_CENTER);
-	gtk_label_set_ellipsize(GTK_LABEL(title), PANGO_ELLIPSIZE_END);
-	gtk_label_set_xalign(GTK_LABEL(title), 0.0f);
-	gtk_box_append(GTK_BOX(summary_content), title);
-	gtk_box_append(GTK_BOX(way_island_pill), summary);
-
-	if (session_count > 0) {
-		GtkWidget *counts = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
-		gtk_widget_add_css_class(counts, "island-counts");
-		gtk_widget_set_halign(counts, GTK_ALIGN_END);
-		gtk_widget_set_valign(counts, GTK_ALIGN_CENTER);
-		gtk_box_append(GTK_BOX(counts), way_island_build_count_badge("waiting", waiting_count));
-		gtk_box_append(GTK_BOX(counts), way_island_build_count_badge("working", working_count));
-		gtk_box_append(GTK_BOX(counts), way_island_build_count_badge("other", other_count));
-		gtk_box_append(GTK_BOX(way_island_pill), counts);
-	}
-	free(pill_payload);
-}
-
-static void way_island_rebuild_list(const char *payload) {
-	if (way_island_list_page == NULL) return;
-
-	way_island_clear_children(way_island_list_page);
-	char *list_payload = way_island_build_list_view_model((char *)(payload != NULL ? payload : ""));
-	g_auto(GStrv) lines = g_strsplit(list_payload, "\n", -1);
-	if (lines[0] == NULL) {
-		free(list_payload);
-		return;
-	}
-
-	GtkWidget *header = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
-	gtk_widget_add_css_class(header, "detail-header");
-
-	g_autofree char *title_text = way_island_decode_field(lines[0]);
-	GtkWidget *title = gtk_label_new(title_text);
-	gtk_widget_add_css_class(title, "detail-title");
-	gtk_label_set_xalign(GTK_LABEL(title), 0.0f);
-	gtk_box_append(GTK_BOX(header), title);
-	gtk_box_append(GTK_BOX(way_island_list_page), header);
-
-	for (gint i = 1; lines[i] != NULL; i++) {
-		if (lines[i][0] == '\0') continue;
-
-		g_auto(GStrv) fields = g_strsplit(lines[i], "\t", 4);
-		if (fields[0] == NULL || fields[1] == NULL || fields[2] == NULL || fields[3] == NULL) continue;
-
-		g_autofree char *session_id = way_island_decode_field(fields[0]);
-		g_autofree char *name = way_island_decode_field(fields[1]);
-		g_autofree char *state_class = way_island_decode_field(fields[2]);
-		g_autofree char *detail_text = way_island_decode_field(fields[3]);
-
-		gtk_box_append(GTK_BOX(way_island_list_page), way_island_build_session_row(session_id, name, state_class, detail_text, ""));
-	}
-	free(list_payload);
-}
-
-static gboolean way_island_rebuild_selected_detail(const char *payload) {
-	if (way_island_detail_page == NULL || payload == NULL || payload[0] == '\0') return FALSE;
-
-	const char *selected_id = way_island_selected_session_id;
-	if (selected_id == NULL || selected_id[0] == '\0') return FALSE;
-
-	way_island_clear_children(way_island_detail_page);
-
-	char *detail_payload = way_island_build_detail_view_model((char *)payload, way_island_panel_view, (char *)selected_id);
-	if (detail_payload == NULL || detail_payload[0] == '\0') {
-		free(detail_payload);
-		return FALSE;
-	}
-
-	g_auto(GStrv) lines = g_strsplit(detail_payload, "\n", -1);
-	if (lines[0] == NULL || lines[0][0] == '\0') {
-		free(detail_payload);
-		return FALSE;
-	}
-
-	g_auto(GStrv) fields = g_strsplit(lines[0], "\t", 6);
-	if (fields[0] == NULL || fields[1] == NULL || fields[2] == NULL || fields[3] == NULL || fields[4] == NULL) {
-		free(detail_payload);
-		return FALSE;
-	}
-
-	g_autofree char *session_id = way_island_decode_field(fields[0]);
-	g_autofree char *name = way_island_decode_field(fields[1]);
-	g_autofree char *state_class = way_island_decode_field(fields[2]);
-	g_autofree char *status_label_text = way_island_decode_field(fields[3]);
-	g_autofree char *detail_text = way_island_decode_field(fields[4]);
-	gint subagent_count = 0;
-	if (fields[5] != NULL) {
-		subagent_count = (gint)g_ascii_strtoll(fields[5], NULL, 10);
-	}
-
-		GtkWidget *header = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
-		gtk_widget_add_css_class(header, "detail-header");
-
-		GtkWidget *back = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
-		gtk_widget_add_css_class(back, "detail-back-button");
-		gtk_widget_set_tooltip_text(back, "Back");
-
-		GtkWidget *back_content = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
-		gtk_widget_add_css_class(back_content, "detail-back-button-content");
-		gtk_box_append(GTK_BOX(back), back_content);
-
-		GtkWidget *back_icon = gtk_image_new_from_icon_name("go-previous-symbolic");
-		gtk_widget_add_css_class(back_icon, "session-row-chevron");
-		gtk_box_append(GTK_BOX(back_content), back_icon);
-		GtkGesture *back_click = gtk_gesture_click_new();
-		g_signal_connect(back_click, "released", G_CALLBACK(on_back_click), NULL);
-		gtk_widget_add_controller(back, GTK_EVENT_CONTROLLER(back_click));
-		gtk_box_append(GTK_BOX(header), back);
-
-		GtkWidget *header_title = gtk_label_new("Session detail");
-		gtk_widget_add_css_class(header_title, "detail-title");
-		gtk_label_set_xalign(GTK_LABEL(header_title), 0.0f);
-		gtk_box_append(GTK_BOX(header), header_title);
-		gtk_box_append(GTK_BOX(way_island_detail_page), header);
-
-		GtkWidget *card = gtk_box_new(GTK_ORIENTATION_VERTICAL, 10);
-		gtk_widget_add_css_class(card, "detail-card");
-		gtk_box_append(GTK_BOX(way_island_detail_page), card);
-
-		GtkWidget *card_content = gtk_box_new(GTK_ORIENTATION_VERTICAL, 10);
-		gtk_widget_add_css_class(card_content, "detail-card-content");
-		gtk_box_append(GTK_BOX(card), card_content);
-
-		GtkWidget *detail_name = gtk_label_new(name);
-		gtk_widget_add_css_class(detail_name, "detail-session-title");
-		gtk_label_set_xalign(GTK_LABEL(detail_name), 0.0f);
-		gtk_label_set_wrap(GTK_LABEL(detail_name), TRUE);
-		gtk_label_set_wrap_mode(GTK_LABEL(detail_name), PANGO_WRAP_WORD_CHAR);
-		gtk_box_append(GTK_BOX(card_content), detail_name);
-
-		GtkWidget *state_row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
-		gtk_box_append(GTK_BOX(card_content), state_row);
-
-		GtkWidget *dot = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
-		gtk_widget_add_css_class(dot, "island-status");
-		gtk_widget_add_css_class(dot, state_class);
-		gtk_widget_set_valign(dot, GTK_ALIGN_CENTER);
-		gtk_box_append(GTK_BOX(state_row), dot);
-
-		GtkWidget *state_label = gtk_label_new(status_label_text);
-		gtk_widget_add_css_class(state_label, "detail-state-label");
-		gtk_label_set_xalign(GTK_LABEL(state_label), 0.0f);
-		gtk_label_set_wrap(GTK_LABEL(state_label), TRUE);
-		gtk_label_set_wrap_mode(GTK_LABEL(state_label), PANGO_WRAP_WORD_CHAR);
-		gtk_box_append(GTK_BOX(state_row), state_label);
-
-		if (detail_text != NULL && detail_text[0] != '\0') {
-			GtkWidget *body = gtk_label_new(detail_text);
-			gtk_widget_add_css_class(body, "detail-body");
-			gtk_label_set_xalign(GTK_LABEL(body), 0.0f);
-			gtk_label_set_wrap(GTK_LABEL(body), TRUE);
-			gtk_label_set_wrap_mode(GTK_LABEL(body), PANGO_WRAP_WORD_CHAR);
-			gtk_box_append(GTK_BOX(card_content), body);
-		}
-
-		GtkWidget *focus_button = gtk_button_new_with_label("Open session");
-		gtk_widget_add_css_class(focus_button, "detail-focus-button");
-		g_object_set_data_full(G_OBJECT(focus_button), "way-island-session-id", g_strdup(session_id), g_free);
-		g_signal_connect(focus_button, "clicked", G_CALLBACK(on_focus_button_click), NULL);
-		gtk_box_append(GTK_BOX(card_content), focus_button);
-
-		if (subagent_count > 0) {
-			g_autofree gchar *subagents_title = g_strdup_printf("SUBAGENTS %d", subagent_count);
-			GtkWidget *subagents_header = gtk_label_new(subagents_title);
-			gtk_widget_add_css_class(subagents_header, "detail-section-title");
-			gtk_label_set_xalign(GTK_LABEL(subagents_header), 0.0f);
-			gtk_box_append(GTK_BOX(way_island_detail_page), subagents_header);
-
-			GtkWidget *subagents_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
-			gtk_widget_add_css_class(subagents_box, "detail-subagents");
-			gtk_box_append(GTK_BOX(way_island_detail_page), subagents_box);
-
-			for (gint i = 1; lines[i] != NULL; i++) {
-				if (lines[i][0] == '\0') continue;
-
-				g_auto(GStrv) subagent_fields = g_strsplit(lines[i], "\t", 4);
-				if (subagent_fields[0] == NULL || subagent_fields[1] == NULL || subagent_fields[2] == NULL || subagent_fields[3] == NULL) continue;
-
-				g_autofree char *subagent_id = way_island_decode_field(subagent_fields[0]);
-				g_autofree char *subagent_name = way_island_decode_field(subagent_fields[1]);
-				g_autofree char *subagent_state_class = way_island_decode_field(subagent_fields[2]);
-				g_autofree char *subagent_detail_text = way_island_decode_field(subagent_fields[3]);
-
-				gtk_box_append(GTK_BOX(subagents_box), way_island_build_session_row(subagent_id, subagent_name, subagent_state_class, subagent_detail_text, ""));
-			}
-		}
-
-	free(detail_payload);
-	return TRUE;
-}
-
-static void way_island_rebuild_detail(const char *payload) {
-	if (way_island_stack == NULL) return;
-
-	if (payload == NULL || payload[0] == '\0') return;
-
-	way_island_rebuild_list(payload);
-	gint stack_view = way_island_overlay_stack_view((char *)payload, way_island_panel_view, (char *)(way_island_selected_session_id != NULL ? way_island_selected_session_id : ""));
-
-	if (stack_view == 2 && way_island_rebuild_selected_detail(payload)) {
-		way_island_set_stack_view(2);
-		return;
-	}
-
-	way_island_set_stack_view(1);
-}
-
-static void way_island_rebuild_ui(const char *payload) {
-	if (way_island_root == NULL || way_island_shell == NULL) return;
-
-	gboolean has_sessions = way_island_overlay_has_sessions((char *)(payload != NULL ? payload : ""));
-
-	gtk_widget_add_css_class(way_island_shell, "island-pill");
-	if (!has_sessions) {
-		gtk_widget_remove_css_class(way_island_shell, "expanded");
-		way_island_panel_view = 0;
-		way_island_pending_panel_view = -1;
-		if (way_island_panel_update_source_id != 0) {
-			g_source_remove(way_island_panel_update_source_id);
-			way_island_panel_update_source_id = 0;
-		}
-		way_island_cancel_hover_close();
-		g_clear_pointer(&way_island_selected_session_id, g_free);
-	}
-
-	way_island_rebuild_pill(payload);
-
-	if (way_island_panel_view != 0 && has_sessions) {
-		gtk_widget_add_css_class(way_island_shell, "expanded");
-		if (way_island_panel_view == 2) {
-			gtk_widget_add_css_class(way_island_shell, "detail-view");
-		} else {
-			gtk_widget_remove_css_class(way_island_shell, "detail-view");
-		}
-		way_island_rebuild_detail(payload);
-		gtk_widget_set_visible(way_island_revealer, TRUE);
-		gtk_revealer_set_reveal_child(GTK_REVEALER(way_island_revealer), TRUE);
-	} else {
-		gtk_widget_remove_css_class(way_island_shell, "expanded");
-		gtk_widget_remove_css_class(way_island_shell, "detail-view");
-		if (way_island_stack != NULL) {
-			way_island_set_stack_view(1);
-		}
-		gtk_revealer_set_reveal_child(GTK_REVEALER(way_island_revealer), FALSE);
-		gtk_widget_queue_resize(way_island_shell);
-	}
-}
-
-static gboolean apply_sessions_payload_idle(gpointer user_data) {
-	const gchar *payload = user_data;
-
-	g_free(way_island_sessions_payload);
-	way_island_sessions_payload = g_strdup(payload);
-	way_island_rebuild_ui(way_island_sessions_payload);
-
-	return G_SOURCE_REMOVE;
-}
-
-static gboolean quit_application_idle(gpointer user_data) {
-	(void)user_data;
-
-	way_island_should_quit = TRUE;
-	if (way_island_app != NULL) {
-		g_application_quit(G_APPLICATION(way_island_app));
-	}
-
-	return G_SOURCE_REMOVE;
-}
-
-static gboolean apply_css_idle(gpointer user_data) {
-	const gchar *css = user_data;
-
-	g_free(way_island_css_data);
-	way_island_css_data = g_strdup(css != NULL ? css : "");
-
-	if (way_island_css_provider != NULL) {
-		gtk_css_provider_load_from_string(way_island_css_provider, way_island_css_data);
-	}
-
-	return G_SOURCE_REMOVE;
-}
-
-static GtkWidget *way_island_build_shell_widget(void) {
-	// shell: outer visual container and clipping boundary
-	way_island_shell = way_island_shell_new();
-
-	way_island_root = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
-	way_island_shell_set_child(way_island_shell, way_island_root);
-
-	// pill: collapsed summary bar
-	way_island_pill = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
-	gtk_widget_add_css_class(way_island_pill, "island-content");
-	gtk_widget_set_hexpand(way_island_pill, TRUE);
-	gtk_box_append(GTK_BOX(way_island_root), way_island_pill);
-
-	// revealer: animates expand/collapse
-	way_island_revealer = gtk_revealer_new();
-	gtk_revealer_set_transition_type(GTK_REVEALER(way_island_revealer), GTK_REVEALER_TRANSITION_TYPE_SLIDE_DOWN);
-	gtk_revealer_set_transition_duration(GTK_REVEALER(way_island_revealer), 200);
-	gtk_revealer_set_reveal_child(GTK_REVEALER(way_island_revealer), FALSE);
-	gtk_widget_set_visible(way_island_revealer, FALSE);
-	g_signal_connect(way_island_revealer, "notify::child-revealed", G_CALLBACK(on_revealer_child_revealed_changed), NULL);
-	gtk_box_append(GTK_BOX(way_island_root), way_island_revealer);
-
-	// detail: expanded session list (inside revealer)
-	way_island_stack = gtk_stack_new();
-	gtk_widget_add_css_class(way_island_stack, "island-detail");
-	gtk_stack_set_transition_duration(GTK_STACK(way_island_stack), 180);
-	gtk_stack_set_transition_type(GTK_STACK(way_island_stack), GTK_STACK_TRANSITION_TYPE_SLIDE_LEFT_RIGHT);
-	gtk_stack_set_hhomogeneous(GTK_STACK(way_island_stack), FALSE);
-	gtk_stack_set_vhomogeneous(GTK_STACK(way_island_stack), FALSE);
-	gtk_stack_set_interpolate_size(GTK_STACK(way_island_stack), TRUE);
-	gtk_revealer_set_child(GTK_REVEALER(way_island_revealer), way_island_stack);
-
-	way_island_list_page = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
-	gtk_widget_add_css_class(way_island_list_page, "detail-page");
-	gtk_stack_add_named(GTK_STACK(way_island_stack), way_island_list_page, "list");
-
-	way_island_detail_page = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
-	gtk_widget_add_css_class(way_island_detail_page, "detail-page");
-	gtk_stack_add_named(GTK_STACK(way_island_stack), way_island_detail_page, "detail");
-	way_island_set_stack_view(1);
-
-	GtkEventController *motion = gtk_event_controller_motion_new();
-	g_signal_connect(motion, "enter", G_CALLBACK(on_hover_enter), NULL);
-	g_signal_connect(motion, "leave", G_CALLBACK(on_hover_leave), NULL);
-	gtk_widget_add_controller(way_island_shell, motion);
-
-	way_island_rebuild_ui(way_island_sessions_payload);
-
-	return way_island_shell;
-}
-
-static void on_activate(GtkApplication *app, gpointer user_data) {
-	(void)user_data;
-	GtkWindow *window = GTK_WINDOW(gtk_application_window_new(app));
-	GdkDisplay *display = gtk_widget_get_display(GTK_WIDGET(window));
-
-	way_island_app = app;
-	way_island_css_provider = gtk_css_provider_new();
-
-	if (way_island_css_data != NULL) {
-		gtk_css_provider_load_from_string(way_island_css_provider, way_island_css_data);
-	}
-	gtk_style_context_add_provider_for_display(
-		display,
-		GTK_STYLE_PROVIDER(way_island_css_provider),
-		GTK_STYLE_PROVIDER_PRIORITY_APPLICATION
-	);
-
-	GtkWidget *shell = way_island_build_shell_widget();
-	if (way_island_should_quit) {
-		g_application_quit(G_APPLICATION(app));
-	}
-
-	gtk_window_set_title(window, "way-island");
-	gtk_window_set_resizable(window, FALSE);
-	gtk_window_set_decorated(window, FALSE);
-	gtk_widget_add_css_class(GTK_WIDGET(window), "way-island-window");
-	gtk_widget_remove_css_class(GTK_WIDGET(window), "background");
-	gtk_widget_remove_css_class(GTK_WIDGET(window), "solid-csd");
-	gtk_window_set_child(window, shell);
-
-	if (gtk_layer_is_supported()) {
-		gtk_layer_init_for_window(window);
-		gtk_layer_set_layer(window, GTK_LAYER_SHELL_LAYER_TOP);
-		gtk_layer_set_anchor(window, GTK_LAYER_SHELL_EDGE_TOP, TRUE);
-		gtk_layer_set_anchor(window, GTK_LAYER_SHELL_EDGE_LEFT, FALSE);
-		gtk_layer_set_anchor(window, GTK_LAYER_SHELL_EDGE_RIGHT, FALSE);
-		gtk_layer_set_keyboard_mode(window, GTK_LAYER_SHELL_KEYBOARD_MODE_NONE);
-		gtk_layer_set_exclusive_zone(window, 0);
-		gtk_layer_set_margin(window, GTK_LAYER_SHELL_EDGE_TOP, 0);
-	}
-
-	gtk_window_present(window);
-}
-
-static GtkWidget *way_island_test_build_widget(const char *payload, gint panel_view, const char *selected_session_id) {
-	g_clear_pointer(&way_island_sessions_payload, g_free);
-	way_island_sessions_payload = g_strdup(payload != NULL ? payload : "");
-
-	g_clear_pointer(&way_island_selected_session_id, g_free);
-	if (selected_session_id != NULL && selected_session_id[0] != '\0') {
-		way_island_selected_session_id = g_strdup(selected_session_id);
-	}
-
-	way_island_panel_view = panel_view;
-	way_island_stack_view = 1;
-	way_island_pending_panel_view = -1;
-
-	return way_island_build_shell_widget();
-}
-
-static void way_island_set_css(const char *css) {
-	g_free(way_island_css_data);
-	way_island_css_data = g_strdup(css);
-}
-
-static void schedule_sessions_payload_update(const char *payload) {
-	g_idle_add_full(
-		G_PRIORITY_DEFAULT,
-		apply_sessions_payload_idle,
-		g_strdup(payload != NULL ? payload : ""),
-		g_free
-	);
-}
-
-static void schedule_css_update(const char *css) {
-	g_idle_add_full(
-		G_PRIORITY_DEFAULT,
-		apply_css_idle,
-		g_strdup(css != NULL ? css : ""),
-		g_free
-	);
-}
-
-static void schedule_application_quit(void) {
-	g_idle_add_full(
-		G_PRIORITY_DEFAULT,
-		quit_application_idle,
-		NULL,
-		NULL
-	);
-}
-
-static int run_app(void) {
-	GtkApplication *app = gtk_application_new("com.github.ka2n.way-island", G_APPLICATION_DEFAULT_FLAGS);
-	int status;
-
-	g_signal_connect(app, "activate", G_CALLBACK(on_activate), NULL);
-	status = g_application_run(G_APPLICATION(app), 0, NULL);
-	g_clear_pointer(&way_island_sessions_payload, g_free);
-	g_clear_pointer(&way_island_selected_session_id, g_free);
-	g_clear_pointer(&way_island_css_data, g_free);
-	g_clear_object(&way_island_css_provider);
-	if (way_island_panel_update_source_id != 0) {
-		g_source_remove(way_island_panel_update_source_id);
-		way_island_panel_update_source_id = 0;
-	}
-	if (way_island_hover_close_source_id != 0) {
-		g_source_remove(way_island_hover_close_source_id);
-		way_island_hover_close_source_id = 0;
-	}
-	way_island_shell = NULL;
-	way_island_stack = NULL;
-	way_island_list_page = NULL;
-	way_island_detail_page = NULL;
-	way_island_revealer = NULL;
-	way_island_pill = NULL;
-	way_island_root = NULL;
-	way_island_app = NULL;
-	way_island_panel_view = 0;
-	way_island_stack_view = 1;
-	way_island_pending_panel_view = -1;
-	way_island_hover_close_source_id = 0;
-	way_island_should_quit = FALSE;
-	g_object_unref(app);
-
-	return status;
-}
-*/
-import "C"
-
 import (
 	"context"
 	_ "embed"
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
-	"unsafe"
 
 	"github.com/fsnotify/fsnotify"
+	"github.com/ka2n/way-island/internal/gtkmini"
 	"github.com/ka2n/way-island/internal/socket"
 )
 
 //go:embed style.css
 var styleCSS string
 
+const hoverCloseDelayMS = 160
+const widthAnimationDuration = 200 * time.Millisecond
+const shellClosedWidth = 200
+const shellExpandedWidth = 340
+
 var gtkSessionFocuser *sessionFocuser
 
-func buildGTKWidgetForTest(payload string, panelView int, selectedSessionID string) unsafe.Pointer {
-	cpayload := C.CString(payload)
-	defer C.free(unsafe.Pointer(cpayload))
-	cselected := C.CString(selectedSessionID)
-	defer C.free(unsafe.Pointer(cselected))
-
-	return unsafe.Pointer(C.way_island_test_build_widget(cpayload, C.gint(panelView), cselected))
+type gtkUI struct {
+	app               *gtkmini.Application
+	window            *gtkmini.Window
+	shell             *gtkmini.Widget
+	root              *gtkmini.Widget
+	pill              *gtkmini.Widget
+	revealer          *gtkmini.Widget
+	stack             *gtkmini.Widget
+	listPage          *gtkmini.Widget
+	detailPage        *gtkmini.Widget
+	cssProvider       *gtkmini.CSSProvider
+	sessionsPayload   string
+	selectedSessionID string
+	cssData           string
+	shouldQuit        bool
+	panelView         int
+	stackView         int
+	pendingPanelView  int
+	panelUpdateSource gtkmini.SourceID
+	hoverCloseSource  gtkmini.SourceID
+	widthAnimSource   gtkmini.SourceID
+	widthAnimFrom     int
+	widthAnimTo       int
+	widthAnimCurrent  int
+	widthAnimStart    time.Time
 }
 
-//export way_island_build_pill_view_model
-func way_island_build_pill_view_model(payload *C.char) *C.char {
-	vm := buildOverlayViewModel(C.GoString(payload), panelViewClosed, "")
-	return C.CString(serializePillViewModel(vm))
-}
-
-//export way_island_build_list_view_model
-func way_island_build_list_view_model(payload *C.char) *C.char {
-	vm := buildOverlayViewModel(C.GoString(payload), panelViewList, "")
-	return C.CString(serializeListViewModel(vm))
-}
-
-//export way_island_build_detail_view_model
-func way_island_build_detail_view_model(payload *C.char, panelView C.int, selectedSessionID *C.char) *C.char {
-	vm := buildOverlayViewModel(C.GoString(payload), int(panelView), C.GoString(selectedSessionID))
-	return C.CString(serializeDetailViewModel(vm))
-}
-
-//export way_island_overlay_has_sessions
-func way_island_overlay_has_sessions(payload *C.char) C.int {
-	vm := buildOverlayViewModel(C.GoString(payload), panelViewClosed, "")
-	if vm.HasSessions {
-		return 1
+func newGTKUI() *gtkUI {
+	return &gtkUI{
+		panelView:        panelViewClosed,
+		stackView:        panelViewList,
+		pendingPanelView: -1,
 	}
-	return 0
 }
 
-//export way_island_overlay_stack_view
-func way_island_overlay_stack_view(payload *C.char, panelView C.int, selectedSessionID *C.char) C.int {
-	vm := buildOverlayViewModel(C.GoString(payload), int(panelView), C.GoString(selectedSessionID))
-	return C.int(vm.StackView)
-}
-
-//export way_island_focus_session
-func way_island_focus_session(sessionID *C.char) {
-	if gtkSessionFocuser == nil || sessionID == nil {
+func (ui *gtkUI) cancelHoverClose() {
+	if ui.hoverCloseSource == 0 {
 		return
 	}
-	id := C.GoString(sessionID)
-	if id == "" {
+	gtkmini.SourceRemove(ui.hoverCloseSource)
+	ui.hoverCloseSource = 0
+}
+
+func easeOutCubic(t float64) float64 {
+	inverse := 1.0 - t
+	return 1.0 - (inverse * inverse * inverse)
+}
+
+func (ui *gtkUI) targetShellWidth() int {
+	if ui.panelView != panelViewClosed && strings.TrimSpace(ui.sessionsPayload) != "" {
+		return shellExpandedWidth
+	}
+	return shellClosedWidth
+}
+
+func (ui *gtkUI) stopWidthAnimation() {
+	if ui.widthAnimSource == 0 {
 		return
 	}
-	log.Printf("focus requested for session_id=%s", id)
-	triggerSessionFocus(gtkSessionFocuser, id)
+	gtkmini.SourceRemove(ui.widthAnimSource)
+	ui.widthAnimSource = 0
+}
+
+func (ui *gtkUI) updateShellWidth(animate bool) {
+	if ui.shell == nil {
+		return
+	}
+
+	targetWidth := ui.targetShellWidth()
+	currentWidth := ui.shell.Width()
+	if ui.widthAnimSource != 0 {
+		currentWidth = ui.widthAnimCurrent
+	}
+
+	ui.stopWidthAnimation()
+
+	if !animate || currentWidth <= 0 || currentWidth == targetWidth {
+		ui.widthAnimCurrent = targetWidth
+		ui.shell.SetSizeRequest(targetWidth, -1)
+		ui.shell.QueueResize()
+		return
+	}
+
+	ui.widthAnimFrom = currentWidth
+	ui.widthAnimTo = targetWidth
+	ui.widthAnimCurrent = currentWidth
+	ui.widthAnimStart = time.Now()
+	ui.widthAnimSource = gtkmini.TimeoutAdd(16, func() bool {
+		elapsed := time.Since(ui.widthAnimStart)
+		progress := float64(elapsed) / float64(widthAnimationDuration)
+		if progress < 0 {
+			progress = 0
+		}
+		if progress > 1 {
+			progress = 1
+		}
+
+		eased := easeOutCubic(progress)
+		width := int(float64(ui.widthAnimFrom) + float64(ui.widthAnimTo-ui.widthAnimFrom)*eased + 0.5)
+		ui.widthAnimCurrent = width
+		ui.shell.SetSizeRequest(width, -1)
+		ui.shell.QueueResize()
+
+		if progress >= 1 {
+			ui.widthAnimSource = 0
+			ui.widthAnimCurrent = ui.widthAnimTo
+			ui.shell.SetSizeRequest(ui.widthAnimTo, -1)
+			return false
+		}
+		return true
+	})
+}
+
+func (ui *gtkUI) schedulePanelView(panelView int) {
+	if ui.pendingPanelView == panelView {
+		return
+	}
+
+	ui.pendingPanelView = panelView
+	if ui.panelUpdateSource != 0 {
+		gtkmini.SourceRemove(ui.panelUpdateSource)
+		ui.panelUpdateSource = 0
+	}
+
+	ui.panelUpdateSource = gtkmini.IdleAdd(func() {
+		ui.panelUpdateSource = 0
+		ui.pendingPanelView = -1
+		if ui.panelView == panelView {
+			return
+		}
+
+		ui.panelView = panelView
+		ui.rebuildUI(ui.sessionsPayload)
+	})
+}
+
+func (ui *gtkUI) setStackView(panelView int) {
+	if ui.stack == nil {
+		return
+	}
+
+	if panelView == panelViewDetail {
+		if ui.stackView != panelViewDetail {
+			ui.stack.StackSetTransitionType(gtkmini.StackTransitionSlideLeft)
+		}
+		ui.stack.StackSetVisibleChildName("detail")
+		ui.stackView = panelViewDetail
+		return
+	}
+
+	if ui.stackView != panelViewList {
+		ui.stack.StackSetTransitionType(gtkmini.StackTransitionSlideRight)
+	}
+	ui.stack.StackSetVisibleChildName("list")
+	ui.stackView = panelViewList
+}
+
+func (ui *gtkUI) onRevealerChildRevealedChanged() {
+	if ui.revealer == nil {
+		return
+	}
+	if ui.revealer.RevealerGetRevealChild() {
+		return
+	}
+	if ui.revealer.RevealerGetChildRevealed() {
+		return
+	}
+
+	ui.revealer.SetVisible(false)
+	ui.setStackView(panelViewList)
+	if ui.shell != nil {
+		ui.updateShellWidth(false)
+		ui.shell.QueueResize()
+	}
+}
+
+func (ui *gtkUI) openDetail(sessionID string) {
+	if sessionID == "" {
+		return
+	}
+	ui.cancelHoverClose()
+	ui.selectedSessionID = sessionID
+	ui.schedulePanelView(panelViewDetail)
+}
+
+func (ui *gtkUI) openPrimaryDetail() {
+	sessions := parsePayloadSessions(ui.sessionsPayload)
+	if len(sessions) == 0 {
+		return
+	}
+	ui.openDetail(sessions[0].ID)
+}
+
+func (ui *gtkUI) openList() {
+	if strings.TrimSpace(ui.sessionsPayload) == "" {
+		return
+	}
+	ui.cancelHoverClose()
+	ui.schedulePanelView(panelViewList)
+}
+
+func (ui *gtkUI) closePanel() {
+	ui.cancelHoverClose()
+	ui.schedulePanelView(panelViewClosed)
+}
+
+func (ui *gtkUI) onHoverEnter() {
+	ui.cancelHoverClose()
+	if strings.TrimSpace(ui.sessionsPayload) == "" {
+		return
+	}
+	if ui.panelView != panelViewClosed {
+		return
+	}
+
+	ui.openList()
+}
+
+func (ui *gtkUI) onHoverLeave() {
+	if ui.panelView == panelViewClosed {
+		return
+	}
+
+	ui.cancelHoverClose()
+	ui.hoverCloseSource = gtkmini.TimeoutAdd(hoverCloseDelayMS, func() bool {
+		ui.hoverCloseSource = 0
+		ui.closePanel()
+		return false
+	})
+}
+
+func (ui *gtkUI) buildCountBadge(group string, count int) *gtkmini.Widget {
+	badge := gtkmini.NewBox(gtkmini.OrientationHorizontal, 6)
+	badge.AddCSSClass("island-count-badge")
+
+	square := gtkmini.NewBox(gtkmini.OrientationHorizontal, 0)
+	square.AddCSSClass("island-count-square")
+	square.AddCSSClass(group)
+	badge.Append(square)
+
+	label := gtkmini.NewLabel(itoa(count))
+	label.AddCSSClass("island-count-label")
+	label.SetVAlign(gtkmini.AlignCenter)
+	badge.Append(label)
+
+	return badge
+}
+
+func sessionGroup(state string) string {
+	switch state {
+	case "waiting":
+		return "waiting"
+	case "working":
+		return "working"
+	default:
+		return "other"
+	}
+}
+
+func (ui *gtkUI) rebuildPill(sessions []payloadSession, pill pillViewModel) {
+	if ui.pill == nil {
+		return
+	}
+
+	ui.pill.ClearBoxChildren()
+
+	waitingCount := 0
+	workingCount := 0
+	otherCount := 0
+	for _, session := range sessions {
+		switch sessionGroup(session.State) {
+		case "waiting":
+			waitingCount++
+		case "working":
+			workingCount++
+		default:
+			otherCount++
+		}
+	}
+
+	status := gtkmini.NewBox(gtkmini.OrientationHorizontal, 0)
+	status.AddCSSClass("island-status")
+	status.AddCSSClass(pill.StateClass)
+	status.SetVAlign(gtkmini.AlignCenter)
+
+	summary := gtkmini.NewBox(gtkmini.OrientationVertical, 0)
+	summary.AddCSSClass("island-summary")
+	summary.SetHexpand(true)
+	if pill.Clickable {
+		summary.ConnectClick(func() {
+			ui.openPrimaryDetail()
+		})
+	}
+
+	summaryContent := gtkmini.NewBox(gtkmini.OrientationHorizontal, 8)
+	summaryContent.AddCSSClass("island-summary-content")
+	summary.Append(summaryContent)
+	summaryContent.Append(status)
+
+	title := gtkmini.NewLabel(pill.Title)
+	title.AddCSSClass("island-title")
+	title.SetHexpand(true)
+	title.SetHAlign(gtkmini.AlignFill)
+	title.SetVAlign(gtkmini.AlignCenter)
+	title.LabelSetEllipsizeEnd()
+	title.LabelSetXAlign(0)
+	summaryContent.Append(title)
+
+	ui.pill.Append(summary)
+
+	if len(sessions) == 0 {
+		return
+	}
+
+	counts := gtkmini.NewBox(gtkmini.OrientationHorizontal, 8)
+	counts.AddCSSClass("island-counts")
+	counts.SetHAlign(gtkmini.AlignEnd)
+	counts.SetVAlign(gtkmini.AlignCenter)
+	counts.Append(ui.buildCountBadge("waiting", waitingCount))
+	counts.Append(ui.buildCountBadge("working", workingCount))
+	counts.Append(ui.buildCountBadge("other", otherCount))
+	ui.pill.Append(counts)
+}
+
+func (ui *gtkUI) buildSessionRow(session payloadSession) *gtkmini.Widget {
+	rowShell := gtkmini.NewBox(gtkmini.OrientationVertical, 0)
+	rowShell.AddCSSClass("session-row-shell")
+
+	row := gtkmini.NewBox(gtkmini.OrientationHorizontal, 8)
+	row.AddCSSClass("session-row")
+	rowShell.Append(row)
+	if session.LastUserMessage != "" {
+		rowShell.SetTooltipText(session.LastUserMessage)
+		row.SetTooltipText(session.LastUserMessage)
+	}
+	row.ConnectClick(func() {
+		ui.openDetail(session.ID)
+	})
+
+	dot := gtkmini.NewBox(gtkmini.OrientationHorizontal, 0)
+	dot.AddCSSClass("island-status")
+	dot.AddCSSClass(statusClass(session.State))
+	dot.SetVAlign(gtkmini.AlignCenter)
+	row.Append(dot)
+
+	textBox := gtkmini.NewBox(gtkmini.OrientationVertical, 2)
+	textBox.SetHexpand(true)
+
+	title := gtkmini.NewLabel(session.Name)
+	title.AddCSSClass("session-row-title")
+	title.LabelSetXAlign(0)
+	title.LabelSetEllipsizeEnd()
+	title.LabelSetMaxWidthChars(30)
+	textBox.Append(title)
+
+	statusText := gtkmini.NewLabel(actionOrStatusLabel(session.Action, session.State))
+	statusText.AddCSSClass("session-row-status")
+	statusText.LabelSetXAlign(0)
+	statusText.LabelSetEllipsizeEnd()
+	statusText.LabelSetMaxWidthChars(48)
+	textBox.Append(statusText)
+
+	row.Append(textBox)
+
+	chevron := gtkmini.NewImageFromIconName("go-next-symbolic")
+	chevron.AddCSSClass("session-row-chevron")
+	chevron.SetVAlign(gtkmini.AlignCenter)
+	row.Append(chevron)
+
+	return rowShell
+}
+
+func (ui *gtkUI) rebuildList(sessions []payloadSession) {
+	if ui.listPage == nil {
+		return
+	}
+
+	ui.listPage.ClearBoxChildren()
+
+	header := gtkmini.NewBox(gtkmini.OrientationHorizontal, 8)
+	header.AddCSSClass("detail-header")
+
+	title := gtkmini.NewLabel("Sessions")
+	title.AddCSSClass("detail-title")
+	title.LabelSetXAlign(0)
+	header.Append(title)
+	ui.listPage.Append(header)
+
+	for _, session := range sessions {
+		ui.listPage.Append(ui.buildSessionRow(session))
+	}
+}
+
+func (ui *gtkUI) rebuildSelectedDetail(sessions []payloadSession) bool {
+	if ui.detailPage == nil || ui.selectedSessionID == "" {
+		return false
+	}
+
+	ui.detailPage.ClearBoxChildren()
+
+	detail := buildDetailViewModel(sessions, ui.selectedSessionID)
+	if detail == nil {
+		return false
+	}
+
+	header := gtkmini.NewBox(gtkmini.OrientationHorizontal, 8)
+	header.AddCSSClass("detail-header")
+
+	back := gtkmini.NewBox(gtkmini.OrientationHorizontal, 0)
+	back.AddCSSClass("detail-back-button")
+	back.SetTooltipText("Back")
+	back.ConnectClick(func() {
+		ui.schedulePanelView(panelViewList)
+	})
+
+	backContent := gtkmini.NewBox(gtkmini.OrientationHorizontal, 0)
+	backContent.AddCSSClass("detail-back-button-content")
+	back.Append(backContent)
+
+	backIcon := gtkmini.NewImageFromIconName("go-previous-symbolic")
+	backIcon.AddCSSClass("session-row-chevron")
+	backContent.Append(backIcon)
+	header.Append(back)
+
+	headerTitle := gtkmini.NewLabel("Session detail")
+	headerTitle.AddCSSClass("detail-title")
+	headerTitle.LabelSetXAlign(0)
+	header.Append(headerTitle)
+	ui.detailPage.Append(header)
+
+	card := gtkmini.NewBox(gtkmini.OrientationVertical, 10)
+	card.AddCSSClass("detail-card")
+	ui.detailPage.Append(card)
+
+	cardContent := gtkmini.NewBox(gtkmini.OrientationVertical, 10)
+	cardContent.AddCSSClass("detail-card-content")
+	card.Append(cardContent)
+
+	detailName := gtkmini.NewLabel(detail.Title)
+	detailName.AddCSSClass("detail-session-title")
+	detailName.LabelSetXAlign(0)
+	detailName.LabelSetWrap(true)
+	cardContent.Append(detailName)
+
+	stateRow := gtkmini.NewBox(gtkmini.OrientationHorizontal, 8)
+	cardContent.Append(stateRow)
+
+	dot := gtkmini.NewBox(gtkmini.OrientationHorizontal, 0)
+	dot.AddCSSClass("island-status")
+	dot.AddCSSClass(detail.StateClass)
+	dot.SetVAlign(gtkmini.AlignCenter)
+	stateRow.Append(dot)
+
+	stateLabel := gtkmini.NewLabel(detail.StatusLabel)
+	stateLabel.AddCSSClass("detail-state-label")
+	stateLabel.LabelSetXAlign(0)
+	stateRow.Append(stateLabel)
+
+	if detail.BodyText != "" {
+		body := gtkmini.NewLabel(detail.BodyText)
+		body.AddCSSClass("detail-body")
+		body.LabelSetXAlign(0)
+		body.LabelSetWrap(true)
+		cardContent.Append(body)
+	}
+
+	sessionID := detail.SessionID
+	focusButton := gtkmini.NewButtonWithLabel("Open session")
+	focusButton.AddCSSClass("detail-focus-button")
+	focusButton.ConnectButtonClicked(func() {
+		ui.closePanel()
+		if gtkSessionFocuser != nil {
+			triggerSessionFocus(gtkSessionFocuser, sessionID)
+		}
+	})
+	cardContent.Append(focusButton)
+
+	return true
+}
+
+func (ui *gtkUI) rebuildDetail(sessions []payloadSession) {
+	if ui.stack == nil {
+		return
+	}
+
+	ui.rebuildList(sessions)
+
+	if ui.panelView == panelViewDetail && ui.rebuildSelectedDetail(sessions) {
+		ui.setStackView(panelViewDetail)
+		return
+	}
+
+	if ui.panelView == panelViewDetail && len(sessions) > 0 {
+		ui.openDetail(sessions[0].ID)
+		if ui.rebuildSelectedDetail(sessions) {
+			ui.setStackView(panelViewDetail)
+			return
+		}
+	}
+
+	ui.setStackView(panelViewList)
+}
+
+func (ui *gtkUI) rebuildUI(payload string) {
+	if ui.root == nil || ui.shell == nil {
+		return
+	}
+
+	animateWidth := ui.shell.Width() > 0
+	sessions := parsePayloadSessions(payload)
+	vm := buildOverlayViewModel(payload, ui.panelView, ui.selectedSessionID)
+
+	ui.shell.AddCSSClass("island-pill")
+	if !vm.HasSessions {
+		ui.shell.RemoveCSSClass("expanded")
+		ui.panelView = panelViewClosed
+		ui.pendingPanelView = -1
+		if ui.panelUpdateSource != 0 {
+			gtkmini.SourceRemove(ui.panelUpdateSource)
+			ui.panelUpdateSource = 0
+		}
+		ui.cancelHoverClose()
+		ui.selectedSessionID = ""
+	}
+
+	ui.rebuildPill(sessions, vm.Pill)
+
+	if ui.panelView != panelViewClosed && vm.HasSessions {
+		ui.shell.AddCSSClass("expanded")
+		if ui.panelView == panelViewDetail {
+			ui.shell.AddCSSClass("detail-view")
+		} else {
+			ui.shell.RemoveCSSClass("detail-view")
+		}
+		ui.rebuildDetail(sessions)
+		ui.revealer.SetVisible(true)
+		ui.revealer.RevealerSetRevealChild(true)
+		ui.updateShellWidth(animateWidth)
+		return
+	}
+
+	ui.shell.RemoveCSSClass("expanded")
+	ui.shell.RemoveCSSClass("detail-view")
+	ui.setStackView(panelViewList)
+	ui.revealer.RevealerSetRevealChild(false)
+	ui.shell.QueueResize()
+	ui.updateShellWidth(animateWidth)
+}
+
+func (ui *gtkUI) buildShellWidget() *gtkmini.Widget {
+	ui.shell = gtkmini.NewShell()
+
+	ui.root = gtkmini.NewBox(gtkmini.OrientationVertical, 0)
+	gtkmini.ShellSetChild(ui.shell, ui.root)
+
+	ui.pill = gtkmini.NewBox(gtkmini.OrientationHorizontal, 8)
+	ui.pill.AddCSSClass("island-content")
+	ui.pill.SetHexpand(true)
+	ui.root.Append(ui.pill)
+
+	ui.revealer = gtkmini.NewRevealer()
+	ui.revealer.RevealerSetTransitionType(gtkmini.RevealerTransitionSlideDown)
+	ui.revealer.RevealerSetTransitionDuration(200)
+	ui.revealer.RevealerSetRevealChild(false)
+	ui.revealer.SetVisible(false)
+	ui.revealer.ConnectNotifyChildRevealed(func() {
+		ui.onRevealerChildRevealedChanged()
+	})
+	ui.root.Append(ui.revealer)
+
+	ui.stack = gtkmini.NewStack()
+	ui.stack.AddCSSClass("island-detail")
+	ui.stack.StackSetTransitionDuration(180)
+	ui.stack.StackSetTransitionType(gtkmini.StackTransitionSlideLeftRight)
+	ui.stack.StackSetHHomogeneous(false)
+	ui.stack.StackSetVHomogeneous(false)
+	ui.stack.StackSetInterpolateSize(true)
+	ui.revealer.RevealerSetChild(ui.stack)
+
+	ui.listPage = gtkmini.NewBox(gtkmini.OrientationVertical, 2)
+	ui.listPage.AddCSSClass("detail-page")
+	ui.stack.StackAddNamed(ui.listPage, "list")
+
+	ui.detailPage = gtkmini.NewBox(gtkmini.OrientationVertical, 2)
+	ui.detailPage.AddCSSClass("detail-page")
+	ui.stack.StackAddNamed(ui.detailPage, "detail")
+	ui.setStackView(panelViewList)
+
+	ui.shell.ConnectHover(func() {
+		ui.onHoverEnter()
+	}, func() {
+		ui.onHoverLeave()
+	})
+
+	ui.rebuildUI(ui.sessionsPayload)
+	return ui.shell
+}
+
+func (ui *gtkUI) onActivate() {
+	ui.window = gtkmini.NewApplicationWindow(ui.app)
+	ui.cssProvider = gtkmini.NewCSSProvider()
+	if ui.cssData != "" {
+		ui.cssProvider.LoadFromString(ui.cssData)
+	}
+
+	ui.window.SetTitle("way-island")
+	ui.window.SetResizable(false)
+	ui.window.SetDecorated(false)
+	gtkmini.AddProviderForDisplay(ui.window.Widget(), ui.cssProvider)
+
+	shell := ui.buildShellWidget()
+	if ui.shouldQuit {
+		ui.app.Quit()
+		return
+	}
+
+	ui.window.Widget().AddCSSClass("way-island-window")
+	ui.window.Widget().RemoveCSSClass("background")
+	ui.window.Widget().RemoveCSSClass("solid-csd")
+	ui.window.SetChild(shell)
+	gtkmini.LayerShellConfigureTop(ui.window)
+	ui.window.Present()
+}
+
+func (ui *gtkUI) setCSS(css string) {
+	ui.cssData = css
+}
+
+func (ui *gtkUI) scheduleSessionsPayloadUpdate(payload string) {
+	gtkmini.IdleAdd(func() {
+		ui.sessionsPayload = payload
+		ui.rebuildUI(ui.sessionsPayload)
+	})
+}
+
+func (ui *gtkUI) scheduleCSSUpdate(css string) {
+	gtkmini.IdleAdd(func() {
+		ui.cssData = css
+		if ui.cssProvider != nil {
+			ui.cssProvider.LoadFromString(ui.cssData)
+		}
+	})
+}
+
+func (ui *gtkUI) scheduleApplicationQuit() {
+	gtkmini.IdleAdd(func() {
+		ui.shouldQuit = true
+		if ui.app != nil {
+			ui.app.Quit()
+		}
+	})
+}
+
+func (ui *gtkUI) run() int {
+	ui.app = gtkmini.NewApplication("com.github.ka2n.way-island")
+	ui.app.ConnectActivate(func() {
+		ui.onActivate()
+	})
+
+	status := ui.app.Run()
+	ui.cancelHoverClose()
+	ui.stopWidthAnimation()
+	ui.widthAnimCurrent = 0
+	if ui.panelUpdateSource != 0 {
+		gtkmini.SourceRemove(ui.panelUpdateSource)
+		ui.panelUpdateSource = 0
+	}
+	if ui.cssProvider != nil {
+		ui.cssProvider.Unref()
+		ui.cssProvider = nil
+	}
+	ui.app.Unref()
+
+	ui.window = nil
+	ui.shell = nil
+	ui.root = nil
+	ui.pill = nil
+	ui.revealer = nil
+	ui.stack = nil
+	ui.listPage = nil
+	ui.detailPage = nil
+	ui.app = nil
+	ui.panelView = panelViewClosed
+	ui.stackView = panelViewList
+	ui.pendingPanelView = -1
+	ui.shouldQuit = false
+
+	return status
+}
+
+func buildGTKWidgetForTest(payload string, panelView int, selectedSessionID string) *gtkmini.Widget {
+	ui := newGTKUI()
+	ui.sessionsPayload = payload
+	ui.selectedSessionID = selectedSessionID
+	ui.panelView = panelView
+	return ui.buildShellWidget()
 }
 
 func runUI(ctx context.Context, updates <-chan socket.SessionUpdate, store *overlayModel) int {
@@ -921,6 +729,8 @@ func runUI(ctx context.Context, updates <-chan socket.SessionUpdate, store *over
 	defer func() {
 		gtkSessionFocuser = nil
 	}()
+
+	ui := newGTKUI()
 
 	cssPaths, pathErr := resolveUserCSSPaths()
 	if pathErr != nil {
@@ -941,30 +751,25 @@ func runUI(ctx context.Context, updates <-chan socket.SessionUpdate, store *over
 			log.Printf("load app CSS: using builtin style.css")
 		}
 	}
-
-	cs := C.CString(appCSS)
-	C.way_island_set_css(cs)
-	C.free(unsafe.Pointer(cs))
+	ui.setCSS(appCSS)
 
 	go forwardUIUpdates(ctx, updates, store, func(payload string) {
-		cs := C.CString(payload)
-		C.schedule_sessions_payload_update(cs)
-		C.free(unsafe.Pointer(cs))
+		ui.scheduleSessionsPayloadUpdate(payload)
 	})
 
 	go func() {
 		<-ctx.Done()
-		C.schedule_application_quit()
+		ui.scheduleApplicationQuit()
 	}()
 
 	if pathErr == nil {
-		go watchCSSChanges(ctx, cssPaths, appCSS)
+		go watchCSSChanges(ctx, cssPaths, appCSS, ui.scheduleCSSUpdate)
 	}
 
-	return int(C.run_app())
+	return ui.run()
 }
 
-func watchCSSChanges(ctx context.Context, cssPaths userCSSPaths, initialCSS string) {
+func watchCSSChanges(ctx context.Context, cssPaths userCSSPaths, initialCSS string, apply func(string)) {
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
 		log.Printf("watch app CSS: create watcher: %v", err)
@@ -1006,9 +811,7 @@ func watchCSSChanges(ctx context.Context, cssPaths userCSSPaths, initialCSS stri
 			lastCSS = currentCSS
 
 			log.Printf("watch app CSS: reloaded (event=%s)", pendingReloadEvent)
-			cs := C.CString(currentCSS)
-			C.schedule_css_update(cs)
-			C.free(unsafe.Pointer(cs))
+			apply(currentCSS)
 		case err := <-watcher.Errors:
 			if err != nil {
 				log.Printf("watch app CSS: %v", err)
