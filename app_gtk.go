@@ -878,6 +878,9 @@ func (ui *gtkUI) setStackView(panelView int) {
 					if ui.shell != nil && ui.widthAnimTo > 0 {
 						ui.applyShellWidth(ui.widthAnimTo)
 					}
+					if ui.panelView == panelViewDetail {
+						ui.syncDetailHostHeight(false)
+					}
 					return false
 				}
 				return true
@@ -1203,6 +1206,7 @@ func (ui *gtkUI) rebuildSelectedDetail(sessions []payloadSession) bool {
 	}
 
 	ui.detailPage.ClearBoxChildren()
+	ui.cachedDetailHeight = 0
 
 	detail := buildDetailViewModel(sessions, ui.selectedSessionID)
 	if detail == nil {
