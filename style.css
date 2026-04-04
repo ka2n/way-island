@@ -99,6 +99,15 @@
   font-weight: 700;
 }
 
+.click-capture-window {
+  background: transparent;
+  box-shadow: none;
+}
+
+.click-capture {
+  background: rgba(10, 14, 20, 0.01);
+}
+
 /* Expanded detail */
 .island-detail {
   margin: 6px 16px 14px 16px;
@@ -201,6 +210,44 @@
   color: #94a3b8;
   font-size: 12px;
   line-height: 1.45;
+}
+
+.detail-meta-row-shell {
+  margin-top: 2px;
+}
+
+.detail-meta-row {
+  min-width: 0;
+  border-radius: 10px;
+  background: rgba(30, 41, 59, 0.36);
+  border: 1px solid rgba(110, 125, 148, 0.16);
+}
+
+.detail-meta-row-content {
+  margin: 8px 10px;
+}
+
+.detail-meta-row-clickable:hover {
+  background: rgba(51, 65, 85, 0.56);
+  border-color: rgba(148, 163, 184, 0.3);
+}
+
+.detail-meta-label {
+  color: #94a3b8;
+  font-size: 11px;
+  font-weight: 700;
+  min-width: 72px;
+}
+
+.detail-meta-value {
+  color: #e2e8f0;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.detail-meta-hint {
+  color: #94a3b8;
+  font-size: 11px;
 }
 
 .detail-section-title {

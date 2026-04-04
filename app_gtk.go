@@ -8,6 +8,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -21,39 +22,112 @@ var styleCSS string
 
 const hoverCloseDelayMS = 160
 const widthAnimationDuration = 200 * time.Millisecond
+const listDetailAnimationDuration = 260 * time.Millisecond
 const shellClosedWidth = 200
 const shellExpandedWidth = 340
+const animationScaleEnv = "WAY_ISLAND_ANIMATION_SCALE"
+const animationDebugEnv = "WAY_ISLAND_DEBUG_ANIMATION"
+
+const (
+	listTransitionNone = iota
+	listTransitionOpening
+	listTransitionClosing
+)
 
 var gtkSessionFocuser *sessionFocuser
+var animationDurationScale = mustLoadAnimationDurationScale()
+var animationDebug = strings.TrimSpace(os.Getenv(animationDebugEnv)) == "1"
+
+func debugAnimationLog(format string, args ...any) {
+	if !animationDebug {
+		return
+	}
+	log.Printf("animdbg: "+format, args...)
+}
+
+func mustLoadAnimationDurationScale() float64 {
+	value := strings.TrimSpace(os.Getenv(animationScaleEnv))
+	if value == "" {
+		log.Printf("%s not set; using default animation scale 1", animationScaleEnv)
+		return 1
+	}
+
+	scale, err := strconv.ParseFloat(value, 64)
+	if err != nil {
+		log.Fatalf("%s must be a positive number: %v", animationScaleEnv, err)
+	}
+	if scale <= 0 {
+		log.Fatalf("%s must be greater than 0, got %q", animationScaleEnv, value)
+	}
+	log.Printf("%s=%v", animationScaleEnv, scale)
+	return scale
+}
+
+func scaledDuration(base time.Duration) time.Duration {
+	scaled := time.Duration(float64(base) * animationDurationScale)
+	if scaled < time.Millisecond {
+		return time.Millisecond
+	}
+	return scaled
+}
+
+func (ui *gtkUI) currentDetailAnimationDuration() time.Duration {
+	if ui != nil && ui.listDetailAnimating {
+		return scaledDuration(listDetailAnimationDuration)
+	}
+	return scaledDuration(widthAnimationDuration)
+}
 
 type gtkUI struct {
-	app               *gtkmini.Application
-	window            *gtkmini.Window
-	shell             *gtkmini.Widget
-	root              *gtkmini.Widget
-	pill              *gtkmini.Widget
-	revealer          *gtkmini.Widget
-	stack             *gtkmini.Widget
-	listPage          *gtkmini.Widget
-	detailPage        *gtkmini.Widget
-	cssProvider       *gtkmini.CSSProvider
-	sessionsPayload   string
-	selectedSessionID string
-	cssData           string
-	shouldQuit        bool
-	panelView         int
-	stackView         int
-	pendingPanelView  int
-	panelUpdateSource gtkmini.SourceID
-	hoverCloseSource  gtkmini.SourceID
-	widthAnimSource   gtkmini.SourceID
-	widthAnimFrom     int
-	widthAnimTo       int
-	widthAnimCurrent  int
-	widthAnimStart    time.Time
+	app                *gtkmini.Application
+	backdropWindow     *gtkmini.Window
+	window             *gtkmini.Window
+	backdrop           *gtkmini.Widget
+	shell              *gtkmini.Widget
+	root               *gtkmini.Widget
+	pill               *gtkmini.Widget
+	detailHost         *gtkmini.Widget
+	closingHost        *gtkmini.Widget
+	slide              *gtkmini.Widget
+	listPage           *gtkmini.Widget
+	detailPage         *gtkmini.Widget
+	closingListPage    *gtkmini.Widget
+	cssProvider        *gtkmini.CSSProvider
+	sessionsPayload    string
+	selectedSessionID  string
+	cssData            string
+	shouldQuit         bool
+	panelView          int
+	stackView          int
+	pendingPanelView   int
+	panelUpdateSource  gtkmini.SourceID
+	hoverCloseSource   gtkmini.SourceID
+	backdropAnimSource gtkmini.SourceID
+	widthAnimSource    gtkmini.SourceID
+	detailAnimSource   gtkmini.SourceID
+	detailOpenSource   gtkmini.SourceID
+	slideAnimSource    gtkmini.SourceID
+	widthAnimFrom      int
+	widthAnimTo        int
+	widthAnimCurrent   int
+	detailAnimFrom     int
+	detailAnimTo       int
+	slideAnimFrom      float64
+	slideAnimTo        float64
+	cachedListWidth    int
+	cachedDetailWidth  int
+	cachedListHeight   int
+	cachedDetailHeight int
+	closingActive      bool
+	listDetailAnimating bool
+	listTransitionMode int
+	wasExpanded        bool
+	panelPinned        bool
+	showingDetail      bool
 }
 
 func newGTKUI() *gtkUI {
+	debugAnimationLog("%s=1", animationDebugEnv)
 	return &gtkUI{
 		panelView:        panelViewClosed,
 		stackView:        panelViewList,
@@ -74,11 +148,88 @@ func easeOutCubic(t float64) float64 {
 	return 1.0 - (inverse * inverse * inverse)
 }
 
-func (ui *gtkUI) targetShellWidth() int {
-	if ui.panelView != panelViewClosed && strings.TrimSpace(ui.sessionsPayload) != "" {
-		return shellExpandedWidth
+func measureShellWidth(widget *gtkmini.Widget, cached *int, fallback int) int {
+	if widget != nil {
+		if width := widget.MeasureNaturalWidth() + 32; width > 0 {
+			if cached != nil {
+				*cached = width
+			}
+			return width
+		}
 	}
-	return shellClosedWidth
+	if cached != nil && *cached > 0 {
+		return *cached
+	}
+	return fallback
+}
+
+func (ui *gtkUI) closedShellWidth() int {
+	return measureShellWidth(ui.pill, nil, shellClosedWidth)
+}
+
+func (ui *gtkUI) listShellWidth() int {
+	return measureShellWidth(ui.listPage, &ui.cachedListWidth, ui.closedShellWidth())
+}
+
+func (ui *gtkUI) detailShellWidth() int {
+	return measureShellWidth(ui.detailPage, &ui.cachedDetailWidth, ui.listShellWidth())
+}
+
+func (ui *gtkUI) frozenListShellWidth() int {
+	return measureShellWidth(ui.closingListPage, &ui.cachedListWidth, ui.listShellWidth())
+}
+
+func (ui *gtkUI) measuredWidthForPanelView(panelView int) int {
+	switch panelView {
+	case panelViewClosed:
+		return ui.closedShellWidth()
+	case panelViewDetail:
+		return ui.detailShellWidth()
+	default:
+		return ui.listShellWidth()
+	}
+}
+
+func contentWidthForShellWidth(width int) int {
+	contentWidth := width - 32
+	if contentWidth < 0 {
+		return 0
+	}
+	return contentWidth
+}
+
+func (ui *gtkUI) applyShellWidth(width int) {
+	if ui.shell == nil {
+		return
+	}
+	ui.widthAnimCurrent = width
+	ui.shell.SetSizeRequest(width, -1)
+	ui.shell.QueueResize()
+
+	contentWidth := contentWidthForShellWidth(width)
+	if ui.detailHost != nil {
+		ui.detailHost.SetSizeRequest(contentWidth, -1)
+		ui.detailHost.QueueResize()
+	}
+	if ui.closingHost != nil {
+		ui.closingHost.SetSizeRequest(contentWidth, -1)
+		ui.closingHost.QueueResize()
+	}
+}
+
+func (ui *gtkUI) targetShellWidth() int {
+	if ui.panelView == panelViewClosed || strings.TrimSpace(ui.sessionsPayload) == "" {
+		targetWidth := ui.closedShellWidth()
+		debugAnimationLog("targetShellWidth panel=%d closed=%d", ui.panelView, targetWidth)
+		return targetWidth
+	}
+
+	targetWidth := ui.listShellWidth()
+	if ui.panelView == panelViewDetail {
+		targetWidth = ui.detailShellWidth()
+	}
+	debugAnimationLog("targetShellWidth panel=%d closed=%d list=%d detail=%d target=%d", ui.panelView, ui.closedShellWidth(), ui.cachedListWidth, ui.cachedDetailWidth, targetWidth)
+	return targetWidth
 }
 
 func (ui *gtkUI) stopWidthAnimation() {
@@ -87,6 +238,332 @@ func (ui *gtkUI) stopWidthAnimation() {
 	}
 	gtkmini.SourceRemove(ui.widthAnimSource)
 	ui.widthAnimSource = 0
+}
+
+func (ui *gtkUI) stopBackdropAnimation() {
+	if ui.backdropAnimSource == 0 {
+		return
+	}
+	gtkmini.SourceRemove(ui.backdropAnimSource)
+	ui.backdropAnimSource = 0
+}
+
+func (ui *gtkUI) animateBackdropOpacity(from, to float64, hideWhenDone bool) {
+	if ui.backdrop == nil || ui.backdropWindow == nil {
+		return
+	}
+
+	ui.stopBackdropAnimation()
+	ui.backdropWindow.Widget().SetVisible(true)
+	ui.backdrop.SetOpacity(from)
+
+	if from == to {
+		ui.backdrop.SetOpacity(to)
+		if hideWhenDone && to <= 0 {
+			ui.backdropWindow.Widget().SetVisible(false)
+		}
+		return
+	}
+
+	start := time.Now()
+	duration := scaledDuration(180 * time.Millisecond)
+	ui.backdropAnimSource = gtkmini.TimeoutAdd(16, func() bool {
+		progress := float64(time.Since(start)) / float64(duration)
+		if progress < 0 {
+			progress = 0
+		}
+		if progress > 1 {
+			progress = 1
+		}
+		eased := easeOutCubic(progress)
+		opacity := from + (to-from)*eased
+		ui.backdrop.SetOpacity(opacity)
+		if progress >= 1 {
+			ui.backdropAnimSource = 0
+			ui.backdrop.SetOpacity(to)
+			if hideWhenDone && to <= 0 {
+				ui.backdropWindow.Widget().SetVisible(false)
+			}
+			return false
+		}
+		return true
+	})
+}
+
+func (ui *gtkUI) syncBackdropVisibility() {
+	if ui.backdropWindow == nil {
+		return
+	}
+
+	active := ui.panelPinned && ui.panelView != panelViewClosed && strings.TrimSpace(ui.sessionsPayload) != ""
+	if ui.backdrop == nil {
+		ui.backdropWindow.Widget().SetVisible(active)
+		return
+	}
+
+	if active {
+		ui.backdrop.AddCSSClass("active")
+		ui.animateBackdropOpacity(0, 1, false)
+		return
+	}
+
+	ui.backdrop.RemoveCSSClass("active")
+	ui.animateBackdropOpacity(1, 0, true)
+}
+
+func (ui *gtkUI) stopDetailAnimation() {
+	if ui.detailAnimSource == 0 {
+		return
+	}
+	gtkmini.SourceRemove(ui.detailAnimSource)
+	ui.detailAnimSource = 0
+}
+
+func (ui *gtkUI) stopSlideAnimation() {
+	if ui.slideAnimSource == 0 {
+		return
+	}
+	gtkmini.SourceRemove(ui.slideAnimSource)
+	ui.slideAnimSource = 0
+}
+
+func (ui *gtkUI) resetLiveSlideToList() {
+	if ui.slide == nil {
+		return
+	}
+	ui.stopSlideAnimation()
+	ui.listDetailAnimating = false
+	ui.showingDetail = false
+	ui.stackView = panelViewList
+	ui.slide.SlideSetShowingDetail(false)
+	ui.slide.SlideSetProgress(1)
+	if ui.detailPage != nil {
+		ui.detailPage.SetOpacity(0)
+	}
+}
+
+func (ui *gtkUI) cancelPendingDetailOpen() {
+	if ui.detailOpenSource == 0 {
+		return
+	}
+	gtkmini.SourceRemove(ui.detailOpenSource)
+	ui.detailOpenSource = 0
+}
+
+func (ui *gtkUI) animateDetailHeight(from, to int, hideWhenDone bool, animate bool) {
+	if ui.detailHost == nil {
+		return
+	}
+	debugAnimationLog("animateDetailHeight panel=%d from=%d to=%d animate=%v hide=%v host=%d", ui.panelView, from, to, animate, hideWhenDone, ui.detailHost.Height())
+
+	ui.stopDetailAnimation()
+	ui.cancelPendingDetailOpen()
+
+	if from < 0 {
+		from = 0
+	}
+	if to < 0 {
+		to = 0
+	}
+
+	ui.detailAnimFrom = from
+	ui.detailAnimTo = to
+	ui.detailHost.SetVisible(true)
+
+	if !animate || from == to {
+		ui.detailHost.ClipSetHeight(to)
+		ui.detailHost.QueueResize()
+		ui.cachedDetailHeight = to
+		if hideWhenDone && to == 0 {
+			ui.detailHost.ClipSetHeight(0)
+			ui.detailHost.QueueResize()
+			ui.detailHost.SetVisible(false)
+		}
+		return
+	}
+
+	ui.detailHost.ClipSetHeight(from)
+	start := time.Now()
+	duration := ui.currentDetailAnimationDuration()
+	ui.detailAnimSource = gtkmini.TimeoutAdd(16, func() bool {
+		progress := float64(time.Since(start)) / float64(duration)
+		if progress < 0 {
+			progress = 0
+		}
+		if progress > 1 {
+			progress = 1
+		}
+		eased := easeOutCubic(progress)
+		height := int(float64(ui.detailAnimFrom) + float64(ui.detailAnimTo-ui.detailAnimFrom)*eased + 0.5)
+		ui.detailHost.ClipSetHeight(height)
+		ui.detailHost.QueueResize()
+		if height > 0 {
+			ui.cachedDetailHeight = height
+		}
+		if progress >= 1 {
+			debugAnimationLog("animateDetailHeight done panel=%d final=%d", ui.panelView, ui.detailAnimTo)
+			ui.detailAnimSource = 0
+			ui.detailHost.ClipSetHeight(ui.detailAnimTo)
+			if ui.detailAnimTo > 0 {
+				ui.cachedDetailHeight = ui.detailAnimTo
+			}
+			if hideWhenDone && ui.detailAnimTo == 0 {
+				ui.detailHost.ClipSetHeight(0)
+				ui.detailHost.QueueResize()
+				ui.detailHost.SetVisible(false)
+			}
+			return false
+		}
+		return true
+	})
+}
+
+func max(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+func (ui *gtkUI) contentMeasureWidth() int {
+	width := shellExpandedWidth - 32
+	if ui.shell != nil {
+		if shellWidth := ui.shell.Width(); shellWidth > 0 {
+			width = shellWidth - 32
+		}
+	}
+	if width < 120 {
+		return 120
+	}
+	return width
+}
+
+func measureWidthFor(widget *gtkmini.Widget, fallback int) int {
+	if widget == nil {
+		return fallback
+	}
+	width := fallback
+	if minWidth := widget.MeasureMinWidth(); minWidth > width {
+		width = minWidth
+	}
+	return width
+}
+
+func (ui *gtkUI) measureCurrentPanelHeight() int {
+	if ui.slide == nil {
+		return 0
+	}
+
+	measureWidth := ui.contentMeasureWidth()
+	debugAnimationLog("measure start panel=%d width=%d list_min=%d detail_min=%d cached_list=%d cached_detail=%d showing_detail=%v", ui.panelView, measureWidth, measureWidthFor(ui.listPage, 0), measureWidthFor(ui.detailPage, 0), ui.cachedListHeight, ui.cachedDetailHeight, ui.showingDetail)
+	listPageHeight := 0
+	detailPageHeight := 0
+	if ui.listPage != nil {
+		if height := ui.listPage.MeasureNaturalHeight(measureWidthFor(ui.listPage, measureWidth)); height > 0 {
+			listPageHeight = height
+			debugAnimationLog("measure list_page=%d", height)
+		}
+	}
+	if ui.detailPage != nil {
+		if height := ui.detailPage.MeasureNaturalHeight(measureWidthFor(ui.detailPage, measureWidth)); height > 0 {
+			detailPageHeight = height
+			debugAnimationLog("measure detail_page=%d", height)
+		}
+	}
+
+	if ui.panelView == panelViewDetail {
+		if detailPageHeight > 0 {
+			ui.cachedDetailHeight = detailPageHeight
+			debugAnimationLog("measure return detail page=%d", detailPageHeight)
+			return detailPageHeight
+		}
+		if ui.cachedDetailHeight > 0 {
+			debugAnimationLog("measure return detail cached=%d", ui.cachedDetailHeight)
+			return ui.cachedDetailHeight
+		}
+	} else {
+		if listPageHeight > 0 {
+			ui.cachedListHeight = listPageHeight
+			debugAnimationLog("measure return list page=%d", listPageHeight)
+			return listPageHeight
+		}
+		if ui.cachedListHeight > 0 {
+			debugAnimationLog("measure return list cached=%d", ui.cachedListHeight)
+			return ui.cachedListHeight
+		}
+	}
+
+	if ui.cachedDetailHeight > 0 {
+		debugAnimationLog("measure return cached_detail=%d", ui.cachedDetailHeight)
+		return ui.cachedDetailHeight
+	}
+	if ui.cachedListHeight > 0 {
+		debugAnimationLog("measure return cached_list=%d", ui.cachedListHeight)
+		return ui.cachedListHeight
+	}
+	debugAnimationLog("measure return default=180")
+	return 180
+}
+
+func (ui *gtkUI) syncDetailHostHeight(animate bool) {
+	if ui.detailHost == nil {
+		return
+	}
+	debugAnimationLog("syncDetailHostHeight panel=%d animate=%v host_height=%d", ui.panelView, animate, ui.detailHost.Height())
+
+	ui.stopDetailAnimation()
+	ui.cancelPendingDetailOpen()
+
+	currentHeight := ui.detailHost.Height()
+	if currentHeight < 0 {
+		currentHeight = 0
+	}
+
+	ui.detailHost.SetVisible(true)
+	if currentHeight > 0 {
+		ui.detailHost.ClipSetHeight(currentHeight)
+	} else {
+		ui.detailHost.ClipSetHeight(0)
+	}
+	ui.detailHost.QueueResize()
+
+	if ui.panelView == panelViewDetail {
+		targetHeight := ui.measureCurrentPanelHeight()
+		if targetHeight > 0 {
+			fromHeight := ui.detailHost.Height()
+			if fromHeight <= 0 {
+				fromHeight = currentHeight
+			}
+			debugAnimationLog("syncDetailHostHeight immediate detail from=%d to=%d", fromHeight, targetHeight)
+			ui.animateDetailHeight(fromHeight, targetHeight, false, animate)
+			return
+		}
+	}
+
+	ui.scheduleDetailHostHeightSync(currentHeight, animate, 0)
+}
+
+func (ui *gtkUI) scheduleDetailHostHeightSync(currentHeight int, animate bool, attempt int) {
+	ui.detailOpenSource = gtkmini.IdleAdd(func() {
+		ui.detailOpenSource = 0
+		if ui.detailHost == nil || ui.slide == nil || ui.panelView == panelViewClosed {
+			return
+		}
+		debugAnimationLog("scheduleDetailHostHeightSync panel=%d animate=%v attempt=%d currentHeight=%d host=%d", ui.panelView, animate, attempt, currentHeight, ui.detailHost.Height())
+
+		if ui.panelView == panelViewDetail && ui.detailPage != nil && ui.detailPage.MeasureNaturalHeight(measureWidthFor(ui.detailPage, ui.contentMeasureWidth())) == 0 && attempt < 6 {
+			debugAnimationLog("scheduleDetailHostHeightSync retry detail natural height=0")
+			ui.scheduleDetailHostHeightSync(currentHeight, animate, attempt+1)
+			return
+		}
+
+		targetHeight := ui.measureCurrentPanelHeight()
+		fromHeight := ui.detailHost.Height()
+		if fromHeight <= 0 {
+			fromHeight = currentHeight
+		}
+		ui.animateDetailHeight(fromHeight, targetHeight, false, animate)
+	})
 }
 
 func (ui *gtkUI) updateShellWidth(animate bool) {
@@ -99,43 +576,207 @@ func (ui *gtkUI) updateShellWidth(animate bool) {
 	if ui.widthAnimSource != 0 {
 		currentWidth = ui.widthAnimCurrent
 	}
+	debugAnimationLog("updateShellWidth panel=%d animate=%v current=%d target=%d source_active=%v", ui.panelView, animate, currentWidth, targetWidth, ui.widthAnimSource != 0)
 
 	ui.stopWidthAnimation()
 
 	if !animate || currentWidth <= 0 || currentWidth == targetWidth {
-		ui.widthAnimCurrent = targetWidth
-		ui.shell.SetSizeRequest(targetWidth, -1)
-		ui.shell.QueueResize()
+		debugAnimationLog("updateShellWidth immediate panel=%d width=%d", ui.panelView, targetWidth)
+		ui.applyShellWidth(targetWidth)
 		return
 	}
 
 	ui.widthAnimFrom = currentWidth
 	ui.widthAnimTo = targetWidth
 	ui.widthAnimCurrent = currentWidth
-	ui.widthAnimStart = time.Now()
+	start := time.Now()
+	duration := scaledDuration(widthAnimationDuration)
+	debugAnimationLog("updateShellWidth animate_start panel=%d from=%d to=%d duration=%s", ui.panelView, ui.widthAnimFrom, ui.widthAnimTo, duration)
 	ui.widthAnimSource = gtkmini.TimeoutAdd(16, func() bool {
-		elapsed := time.Since(ui.widthAnimStart)
-		progress := float64(elapsed) / float64(widthAnimationDuration)
+		progress := float64(time.Since(start)) / float64(duration)
 		if progress < 0 {
 			progress = 0
 		}
 		if progress > 1 {
 			progress = 1
 		}
-
 		eased := easeOutCubic(progress)
 		width := int(float64(ui.widthAnimFrom) + float64(ui.widthAnimTo-ui.widthAnimFrom)*eased + 0.5)
-		ui.widthAnimCurrent = width
-		ui.shell.SetSizeRequest(width, -1)
-		ui.shell.QueueResize()
+		ui.applyShellWidth(width)
 
 		if progress >= 1 {
 			ui.widthAnimSource = 0
-			ui.widthAnimCurrent = ui.widthAnimTo
-			ui.shell.SetSizeRequest(ui.widthAnimTo, -1)
+			ui.applyShellWidth(ui.widthAnimTo)
+			debugAnimationLog("updateShellWidth animate_done panel=%d final=%d", ui.panelView, ui.widthAnimTo)
 			return false
 		}
 		return true
+	})
+}
+
+func (ui *gtkUI) frozenListHeight() int {
+	measureWidth := measureWidthFor(ui.closingListPage, ui.contentMeasureWidth())
+	if ui.closingListPage != nil {
+		if height := ui.closingListPage.MeasureNaturalHeight(measureWidth); height > 0 {
+			ui.cachedListHeight = height
+		}
+	}
+	if ui.cachedListHeight > 0 {
+		return ui.cachedListHeight
+	}
+	return 180
+}
+
+func (ui *gtkUI) hideFrozenListHost() {
+	if ui.closingHost == nil {
+		return
+	}
+	ui.closingHost.ClipSetHeight(0)
+	ui.closingHost.SetVisible(false)
+}
+
+func (ui *gtkUI) completeFrozenListOpen() {
+	if ui.panelView != panelViewList {
+		return
+	}
+	debugAnimationLog("completeFrozenListOpen")
+	ui.listTransitionMode = listTransitionNone
+	ui.closingActive = false
+	ui.hideFrozenListHost()
+	ui.wasExpanded = true
+	ui.rebuildDetail(parsePayloadSessions(ui.sessionsPayload))
+	ui.syncDetailHostHeight(false)
+	ui.updateShellWidth(false)
+}
+
+func (ui *gtkUI) animateFrozenListTransition(fromWidth, toWidth, fromHeight, toHeight int, animate bool, onDone func()) {
+	if ui.shell == nil || ui.closingHost == nil {
+		return
+	}
+	debugAnimationLog("animateFrozenListTransition mode=%d fromWidth=%d toWidth=%d fromHeight=%d toHeight=%d animate=%v", ui.listTransitionMode, fromWidth, toWidth, fromHeight, toHeight, animate)
+	if fromHeight < 0 {
+		fromHeight = 0
+	}
+	if toHeight < 0 {
+		toHeight = 0
+	}
+	if fromWidth <= 0 {
+		fromWidth = ui.shell.Width()
+	}
+	if fromWidth <= 0 {
+		fromWidth = ui.closedShellWidth()
+	}
+	if toWidth <= 0 {
+		toWidth = ui.closedShellWidth()
+	}
+
+	ui.stopWidthAnimation()
+	ui.stopDetailAnimation()
+	ui.cancelPendingDetailOpen()
+
+	ui.widthAnimFrom = fromWidth
+	ui.widthAnimTo = toWidth
+	ui.widthAnimCurrent = fromWidth
+	ui.detailAnimFrom = fromHeight
+	ui.detailAnimTo = toHeight
+
+	ui.closingHost.SetVisible(true)
+	ui.closingHost.SetOverflowHidden()
+	ui.closingHost.ClipSetHeight(fromHeight)
+	ui.closingHost.QueueResize()
+	ui.closingActive = true
+
+	finish := func() {
+		debugAnimationLog("animateFrozenListTransition done mode=%d finalWidth=%d", ui.listTransitionMode, toWidth)
+		ui.widthAnimSource = 0
+		ui.applyShellWidth(toWidth)
+		ui.closingActive = false
+		if onDone != nil {
+			gtkmini.IdleAdd(onDone)
+		}
+	}
+
+	if !animate {
+		finish()
+		return
+	}
+
+	start := time.Now()
+	duration := scaledDuration(widthAnimationDuration)
+	ui.widthAnimSource = gtkmini.TimeoutAdd(16, func() bool {
+		progress := float64(time.Since(start)) / float64(duration)
+		if progress < 0 {
+			progress = 0
+		}
+		if progress > 1 {
+			progress = 1
+		}
+		eased := easeOutCubic(progress)
+
+		width := int(float64(ui.widthAnimFrom) + float64(ui.widthAnimTo-ui.widthAnimFrom)*eased + 0.5)
+		height := int(float64(ui.detailAnimFrom) + float64(ui.detailAnimTo-ui.detailAnimFrom)*progress + 0.5)
+
+		ui.applyShellWidth(width)
+		ui.closingHost.ClipSetHeight(height)
+		ui.closingHost.QueueResize()
+
+		if progress >= 1 {
+			finish()
+			return false
+		}
+		return true
+	})
+}
+
+func (ui *gtkUI) startFrozenListOpen(sessions []payloadSession, animate bool) {
+	if ui.closingHost == nil || ui.closingListPage == nil || ui.shell == nil {
+		return
+	}
+	debugAnimationLog("startFrozenListOpen animate=%v sessions=%d", animate, len(sessions))
+	ui.listTransitionMode = listTransitionOpening
+	ui.rebuildListInto(ui.closingListPage, sessions, false)
+	if ui.detailHost != nil {
+		ui.detailHost.SetVisible(false)
+		ui.detailHost.ClipSetHeight(0)
+	}
+	ui.closingHost.SetVisible(true)
+	ui.closingHost.ClipSetHeight(0)
+	ui.closingHost.QueueResize()
+	currentWidth := ui.shell.Width()
+	if ui.widthAnimSource != 0 {
+		currentWidth = ui.widthAnimCurrent
+	}
+	gtkmini.IdleAdd(func() {
+		targetHeight := ui.frozenListHeight()
+		targetWidth := ui.frozenListShellWidth()
+		ui.animateFrozenListTransition(currentWidth, targetWidth, 0, targetHeight, animate, func() {
+			ui.completeFrozenListOpen()
+		})
+	})
+}
+
+func (ui *gtkUI) startFrozenListClose(sessions []payloadSession, fromHeight int, animate bool) {
+	if ui.closingHost == nil || ui.closingListPage == nil || ui.shell == nil {
+		return
+	}
+	debugAnimationLog("startFrozenListClose animate=%v sessions=%d fromHeight=%d", animate, len(sessions), fromHeight)
+	ui.listTransitionMode = listTransitionClosing
+	ui.rebuildListInto(ui.closingListPage, sessions, false)
+	ui.resetLiveSlideToList()
+	if fromHeight <= 0 {
+		fromHeight = ui.frozenListHeight()
+	}
+	if ui.detailHost != nil {
+		ui.detailHost.SetVisible(false)
+		ui.detailHost.ClipSetHeight(0)
+	}
+	currentWidth := ui.shell.Width()
+	if ui.widthAnimSource != 0 {
+		currentWidth = ui.widthAnimCurrent
+	}
+	ui.animateFrozenListTransition(currentWidth, ui.closedShellWidth(), fromHeight, 0, animate, func() {
+		ui.listTransitionMode = listTransitionNone
+		ui.hideFrozenListHost()
 	})
 }
 
@@ -163,49 +804,153 @@ func (ui *gtkUI) schedulePanelView(panelView int) {
 }
 
 func (ui *gtkUI) setStackView(panelView int) {
-	if ui.stack == nil {
+	if ui.slide == nil {
 		return
+	}
+	debugAnimationLog("setStackView current=%d target=%d", ui.stackView, panelView)
+
+	ui.stopSlideAnimation()
+	widthFrom := 0
+	widthTo := 0
+	animateWidthWithSlide := ui.shell != nil && ui.stackView != panelView
+	if animateWidthWithSlide {
+		if ui.widthAnimSource != 0 {
+			widthFrom = ui.widthAnimCurrent
+		} else if ui.shell != nil {
+			widthFrom = ui.shell.Width()
+		}
+		if widthFrom <= 0 {
+			widthFrom = ui.measuredWidthForPanelView(ui.stackView)
+		}
+		ui.stopWidthAnimation()
+		if ui.shell != nil && widthFrom > 0 {
+			ui.applyShellWidth(widthFrom)
+		}
 	}
 
 	if panelView == panelViewDetail {
-		if ui.stackView != panelViewDetail {
-			ui.stack.StackSetTransitionType(gtkmini.StackTransitionSlideLeft)
+		ui.slide.SlideSetShowingDetail(true)
+		if ui.stackView == panelViewDetail {
+			ui.listDetailAnimating = false
+			ui.slide.SlideSetProgress(1)
+			if ui.detailPage != nil {
+				ui.detailPage.SetOpacity(1)
+			}
+		} else {
+			widthTo = ui.measuredWidthForPanelView(panelViewDetail)
+			ui.slideAnimFrom = 0
+			ui.slideAnimTo = 1
+			ui.slide.SlideSetProgress(ui.slideAnimFrom)
+			if ui.detailPage != nil {
+				ui.detailPage.SetOpacity(0)
+			}
+			ui.listDetailAnimating = animateWidthWithSlide && widthFrom > 0 && widthTo > 0 && widthFrom != widthTo
+			ui.widthAnimFrom = widthFrom
+			ui.widthAnimTo = widthTo
+			ui.widthAnimCurrent = widthFrom
+			debugAnimationLog("setStackView detail width from=%d to=%d animate=%v", widthFrom, widthTo, ui.listDetailAnimating)
+			start := time.Now()
+			duration := scaledDuration(listDetailAnimationDuration)
+			ui.slideAnimSource = gtkmini.TimeoutAdd(16, func() bool {
+				progress := float64(time.Since(start)) / float64(duration)
+				if progress < 0 {
+					progress = 0
+				}
+				if progress > 1 {
+					progress = 1
+				}
+				eased := easeOutCubic(progress)
+				value := ui.slideAnimFrom + (ui.slideAnimTo-ui.slideAnimFrom)*eased
+				ui.slide.SlideSetProgress(value)
+				if ui.detailPage != nil {
+					ui.detailPage.SetOpacity(eased)
+				}
+				if ui.shell != nil && ui.widthAnimFrom > 0 && ui.widthAnimTo > 0 {
+					width := int(float64(ui.widthAnimFrom) + float64(ui.widthAnimTo-ui.widthAnimFrom)*eased + 0.5)
+					ui.applyShellWidth(width)
+				}
+				if progress >= 1 {
+					ui.slideAnimSource = 0
+					ui.listDetailAnimating = false
+					if ui.detailPage != nil {
+						ui.detailPage.SetOpacity(1)
+					}
+					if ui.shell != nil && ui.widthAnimTo > 0 {
+						ui.applyShellWidth(ui.widthAnimTo)
+					}
+					return false
+				}
+				return true
+			})
 		}
-		ui.stack.StackSetVisibleChildName("detail")
+		ui.showingDetail = true
 		ui.stackView = panelViewDetail
 		return
 	}
 
-	if ui.stackView != panelViewList {
-		ui.stack.StackSetTransitionType(gtkmini.StackTransitionSlideRight)
+	ui.slide.SlideSetShowingDetail(false)
+	if ui.stackView == panelViewList {
+		ui.listDetailAnimating = false
+		ui.slide.SlideSetProgress(1)
+		if ui.detailPage != nil {
+			ui.detailPage.SetOpacity(0)
+		}
+	} else {
+		widthTo = ui.measuredWidthForPanelView(panelViewList)
+		ui.slideAnimFrom = 0
+		ui.slideAnimTo = 1
+		ui.slide.SlideSetProgress(ui.slideAnimFrom)
+		if ui.detailPage != nil {
+			ui.detailPage.SetOpacity(1)
+		}
+		ui.listDetailAnimating = animateWidthWithSlide && widthFrom > 0 && widthTo > 0 && widthFrom != widthTo
+		ui.widthAnimFrom = widthFrom
+		ui.widthAnimTo = widthTo
+		ui.widthAnimCurrent = widthFrom
+		debugAnimationLog("setStackView list width from=%d to=%d animate=%v", widthFrom, widthTo, ui.listDetailAnimating)
+		start := time.Now()
+		duration := scaledDuration(listDetailAnimationDuration)
+		ui.slideAnimSource = gtkmini.TimeoutAdd(16, func() bool {
+			progress := float64(time.Since(start)) / float64(duration)
+			if progress < 0 {
+				progress = 0
+			}
+			if progress > 1 {
+				progress = 1
+			}
+			eased := easeOutCubic(progress)
+			value := ui.slideAnimFrom + (ui.slideAnimTo-ui.slideAnimFrom)*eased
+			ui.slide.SlideSetProgress(value)
+			if ui.detailPage != nil {
+				ui.detailPage.SetOpacity(1 - eased)
+			}
+			if ui.shell != nil && ui.widthAnimFrom > 0 && ui.widthAnimTo > 0 {
+				width := int(float64(ui.widthAnimFrom) + float64(ui.widthAnimTo-ui.widthAnimFrom)*eased + 0.5)
+				ui.applyShellWidth(width)
+			}
+			if progress >= 1 {
+				ui.slideAnimSource = 0
+				ui.listDetailAnimating = false
+				if ui.detailPage != nil {
+					ui.detailPage.SetOpacity(0)
+				}
+				if ui.shell != nil && ui.widthAnimTo > 0 {
+					ui.applyShellWidth(ui.widthAnimTo)
+				}
+				return false
+			}
+			return true
+		})
 	}
-	ui.stack.StackSetVisibleChildName("list")
+	ui.showingDetail = false
 	ui.stackView = panelViewList
-}
-
-func (ui *gtkUI) onRevealerChildRevealedChanged() {
-	if ui.revealer == nil {
-		return
-	}
-	if ui.revealer.RevealerGetRevealChild() {
-		return
-	}
-	if ui.revealer.RevealerGetChildRevealed() {
-		return
-	}
-
-	ui.revealer.SetVisible(false)
-	ui.setStackView(panelViewList)
-	if ui.shell != nil {
-		ui.updateShellWidth(false)
-		ui.shell.QueueResize()
-	}
 }
 
 func (ui *gtkUI) openDetail(sessionID string) {
 	if sessionID == "" {
 		return
 	}
+	debugAnimationLog("openDetail session=%s", sessionID)
 	ui.cancelHoverClose()
 	ui.selectedSessionID = sessionID
 	ui.schedulePanelView(panelViewDetail)
@@ -223,13 +968,24 @@ func (ui *gtkUI) openList() {
 	if strings.TrimSpace(ui.sessionsPayload) == "" {
 		return
 	}
+	debugAnimationLog("openList")
 	ui.cancelHoverClose()
 	ui.schedulePanelView(panelViewList)
 }
 
 func (ui *gtkUI) closePanel() {
+	debugAnimationLog("closePanel")
 	ui.cancelHoverClose()
+	ui.panelPinned = false
 	ui.schedulePanelView(panelViewClosed)
+}
+
+func (ui *gtkUI) pinPanel() {
+	if ui.panelView == panelViewClosed {
+		return
+	}
+	ui.cancelHoverClose()
+	ui.panelPinned = true
 }
 
 func (ui *gtkUI) onHoverEnter() {
@@ -246,6 +1002,9 @@ func (ui *gtkUI) onHoverEnter() {
 
 func (ui *gtkUI) onHoverLeave() {
 	if ui.panelView == panelViewClosed {
+		return
+	}
+	if ui.panelPinned {
 		return
 	}
 
@@ -362,7 +1121,7 @@ func (ui *gtkUI) rebuildPill(sessions []payloadSession, pill pillViewModel) {
 	}
 }
 
-func (ui *gtkUI) buildSessionRow(session payloadSession) *gtkmini.Widget {
+func (ui *gtkUI) buildSessionRow(session payloadSession, interactive bool) *gtkmini.Widget {
 	rowShell := gtkmini.NewBox(gtkmini.OrientationVertical, 0)
 	rowShell.AddCSSClass("session-row-shell")
 
@@ -373,9 +1132,12 @@ func (ui *gtkUI) buildSessionRow(session payloadSession) *gtkmini.Widget {
 		rowShell.SetTooltipText(session.LastUserMessage)
 		row.SetTooltipText(session.LastUserMessage)
 	}
-	row.ConnectClick(func() {
-		ui.openDetail(session.ID)
-	})
+	if interactive {
+		row.ConnectClick(func() {
+			ui.pinPanel()
+			ui.openDetail(session.ID)
+		})
+	}
 
 	dot := gtkmini.NewBox(gtkmini.OrientationHorizontal, 0)
 	dot.AddCSSClass("island-status")
@@ -386,7 +1148,7 @@ func (ui *gtkUI) buildSessionRow(session payloadSession) *gtkmini.Widget {
 	textBox := gtkmini.NewBox(gtkmini.OrientationVertical, 2)
 	textBox.SetHexpand(true)
 
-	title := gtkmini.NewLabel(session.Name)
+	title := gtkmini.NewLabel(displayName(session))
 	title.AddCSSClass("session-row-title")
 	title.LabelSetXAlign(0)
 	title.LabelSetEllipsizeEnd()
@@ -411,11 +1173,15 @@ func (ui *gtkUI) buildSessionRow(session payloadSession) *gtkmini.Widget {
 }
 
 func (ui *gtkUI) rebuildList(sessions []payloadSession) {
-	if ui.listPage == nil {
+	ui.rebuildListInto(ui.listPage, sessions, true)
+}
+
+func (ui *gtkUI) rebuildListInto(container *gtkmini.Widget, sessions []payloadSession, interactive bool) {
+	if container == nil {
 		return
 	}
 
-	ui.listPage.ClearBoxChildren()
+	container.ClearBoxChildren()
 
 	header := gtkmini.NewBox(gtkmini.OrientationHorizontal, 8)
 	header.AddCSSClass("detail-header")
@@ -424,10 +1190,10 @@ func (ui *gtkUI) rebuildList(sessions []payloadSession) {
 	title.AddCSSClass("detail-title")
 	title.LabelSetXAlign(0)
 	header.Append(title)
-	ui.listPage.Append(header)
+	container.Append(header)
 
 	for _, session := range sessions {
-		ui.listPage.Append(ui.buildSessionRow(session))
+		container.Append(ui.buildSessionRow(session, interactive))
 	}
 }
 
@@ -450,6 +1216,7 @@ func (ui *gtkUI) rebuildSelectedDetail(sessions []payloadSession) bool {
 	back.AddCSSClass("detail-back-button")
 	back.SetTooltipText("Back")
 	back.ConnectClick(func() {
+		ui.pinPanel()
 		ui.schedulePanelView(panelViewList)
 	})
 
@@ -504,7 +1271,22 @@ func (ui *gtkUI) rebuildSelectedDetail(sessions []payloadSession) bool {
 		cardContent.Append(body)
 	}
 
+	if detail.Agent != "" {
+		agentRow := buildDetailMetaRow("Agent", detail.Agent, false, nil)
+		cardContent.Append(agentRow)
+	}
+
+	if detail.AgentName != "" {
+		agentNameRow := buildDetailMetaRow("Agent名", detail.AgentName, false, nil)
+		cardContent.Append(agentNameRow)
+	}
+
 	sessionID := detail.SessionID
+	sessionIDRow := buildDetailMetaRow("SessionID", sessionID, true, func(widget *gtkmini.Widget) {
+		widget.CopyToClipboard(sessionID)
+	})
+	cardContent.Append(sessionIDRow)
+
 	focusButton := gtkmini.NewButtonWithLabel("Open session")
 	focusButton.AddCSSClass("detail-focus-button")
 	focusButton.ConnectButtonClicked(func() {
@@ -518,8 +1300,65 @@ func (ui *gtkUI) rebuildSelectedDetail(sessions []payloadSession) bool {
 	return true
 }
 
+func buildDetailMetaRow(labelText, valueText string, clickable bool, onClick func(widget *gtkmini.Widget)) *gtkmini.Widget {
+	rowShell := gtkmini.NewBox(gtkmini.OrientationHorizontal, 0)
+	rowShell.AddCSSClass("detail-meta-row-shell")
+
+	row := gtkmini.NewBox(gtkmini.OrientationHorizontal, 8)
+	row.AddCSSClass("detail-meta-row")
+	if clickable {
+		row.AddCSSClass("detail-meta-row-clickable")
+		row.SetTooltipText("Click to copy")
+	}
+	rowShell.Append(row)
+
+	rowContent := gtkmini.NewBox(gtkmini.OrientationHorizontal, 8)
+	rowContent.AddCSSClass("detail-meta-row-content")
+	row.Append(rowContent)
+
+	label := gtkmini.NewLabel(labelText)
+	label.AddCSSClass("detail-meta-label")
+	label.LabelSetXAlign(0)
+	rowContent.Append(label)
+
+	value := gtkmini.NewLabel(valueText)
+	value.AddCSSClass("detail-meta-value")
+	value.LabelSetXAlign(0)
+	value.LabelSetEllipsizeEnd()
+	value.SetHexpand(true)
+	rowContent.Append(value)
+
+	if clickable {
+		hint := gtkmini.NewLabel("Click to copy")
+		hint.AddCSSClass("detail-meta-hint")
+		hint.LabelSetXAlign(1)
+		rowContent.Append(hint)
+
+		var resetSource gtkmini.SourceID
+
+		row.ConnectClick(func() {
+			if onClick != nil {
+				onClick(row)
+			}
+			if resetSource != 0 {
+				gtkmini.SourceRemove(resetSource)
+			}
+			hint.LabelSetText("Copied!")
+			row.SetTooltipText("Copied!")
+			resetSource = gtkmini.TimeoutAdd(1500, func() bool {
+				hint.LabelSetText("Click to copy")
+				row.SetTooltipText("Click to copy")
+				resetSource = 0
+				return false
+			})
+		})
+	}
+
+	return rowShell
+}
+
 func (ui *gtkUI) rebuildDetail(sessions []payloadSession) {
-	if ui.stack == nil {
+	if ui.slide == nil {
 		return
 	}
 
@@ -560,10 +1399,27 @@ func (ui *gtkUI) rebuildUI(payload string) {
 			ui.panelUpdateSource = 0
 		}
 		ui.cancelHoverClose()
+		ui.panelPinned = false
 		ui.selectedSessionID = ""
+		ui.resetLiveSlideToList()
 	}
 
 	ui.rebuildPill(sessions, vm.Pill)
+	ui.syncBackdropVisibility()
+	debugAnimationLog("rebuildUI panel=%d stackView=%d hasSessions=%v animateWidth=%v closingActive=%v mode=%d wasExpanded=%v pinned=%v shellWidth=%d", ui.panelView, ui.stackView, vm.HasSessions, animateWidth, ui.closingActive, ui.listTransitionMode, ui.wasExpanded, ui.panelPinned, ui.shell.Width())
+
+	if ui.closingActive {
+		if ui.panelView == panelViewDetail {
+			ui.closingActive = false
+			ui.listTransitionMode = listTransitionNone
+			ui.hideFrozenListHost()
+		} else {
+			if ui.panelView != panelViewClosed {
+				ui.shell.AddCSSClass("expanded")
+			}
+			return
+		}
+	}
 
 	if ui.panelView != panelViewClosed && vm.HasSessions {
 		ui.shell.AddCSSClass("expanded")
@@ -572,19 +1428,46 @@ func (ui *gtkUI) rebuildUI(payload string) {
 		} else {
 			ui.shell.RemoveCSSClass("detail-view")
 		}
+		if ui.panelView == panelViewList && !ui.wasExpanded && animateWidth {
+			ui.startFrozenListOpen(sessions, true)
+			return
+		}
+		ui.wasExpanded = true
+		ui.listTransitionMode = listTransitionNone
+		ui.hideFrozenListHost()
 		ui.rebuildDetail(sessions)
-		ui.revealer.SetVisible(true)
-		ui.revealer.RevealerSetRevealChild(true)
-		ui.updateShellWidth(animateWidth)
+		ui.syncDetailHostHeight(animateWidth)
+		if !ui.listDetailAnimating {
+			ui.updateShellWidth(animateWidth)
+		}
 		return
 	}
 
 	ui.shell.RemoveCSSClass("expanded")
 	ui.shell.RemoveCSSClass("detail-view")
-	ui.setStackView(panelViewList)
-	ui.revealer.RevealerSetRevealChild(false)
-	ui.shell.QueueResize()
-	ui.updateShellWidth(animateWidth)
+	if !ui.wasExpanded {
+		if ui.detailHost != nil {
+			ui.detailHost.SetVisible(false)
+			ui.detailHost.ClipSetHeight(0)
+		}
+		ui.listTransitionMode = listTransitionNone
+		ui.hideFrozenListHost()
+		closedWidth := ui.closedShellWidth()
+		ui.applyShellWidth(closedWidth)
+		ui.syncBackdropVisibility()
+		return
+	}
+	ui.wasExpanded = false
+	currentHeight := 0
+	if ui.detailHost != nil && ui.detailHost.Height() > 0 {
+		currentHeight = ui.detailHost.Height()
+	} else if ui.cachedListHeight > 0 {
+		currentHeight = ui.cachedListHeight
+	}
+	if currentHeight > 0 && ui.closingListPage != nil {
+		ui.startFrozenListClose(sessions, currentHeight, animateWidth)
+	}
+	ui.syncBackdropVisibility()
 }
 
 func (ui *gtkUI) buildShellWidget() *gtkmini.Widget {
@@ -598,33 +1481,56 @@ func (ui *gtkUI) buildShellWidget() *gtkmini.Widget {
 	ui.pill.SetHexpand(true)
 	ui.root.Append(ui.pill)
 
-	ui.revealer = gtkmini.NewRevealer()
-	ui.revealer.RevealerSetTransitionType(gtkmini.RevealerTransitionSlideDown)
-	ui.revealer.RevealerSetTransitionDuration(200)
-	ui.revealer.RevealerSetRevealChild(false)
-	ui.revealer.SetVisible(false)
-	ui.revealer.ConnectNotifyChildRevealed(func() {
-		ui.onRevealerChildRevealedChanged()
-	})
-	ui.root.Append(ui.revealer)
+	ui.detailHost = gtkmini.NewClip()
+	ui.detailHost.SetHexpand(true)
+	ui.detailHost.SetHAlign(gtkmini.AlignFill)
+	ui.detailHost.SetOverflowHidden()
+	ui.detailHost.ClipSetHeight(0)
+	ui.detailHost.SetVisible(false)
+	ui.root.Append(ui.detailHost)
 
-	ui.stack = gtkmini.NewStack()
-	ui.stack.AddCSSClass("island-detail")
-	ui.stack.StackSetTransitionDuration(180)
-	ui.stack.StackSetTransitionType(gtkmini.StackTransitionSlideLeftRight)
-	ui.stack.StackSetHHomogeneous(false)
-	ui.stack.StackSetVHomogeneous(false)
-	ui.stack.StackSetInterpolateSize(true)
-	ui.revealer.RevealerSetChild(ui.stack)
+	ui.closingHost = gtkmini.NewClip()
+	ui.closingHost.SetHexpand(true)
+	ui.closingHost.SetHAlign(gtkmini.AlignFill)
+	ui.closingHost.SetOverflowHidden()
+	ui.closingHost.ClipSetHeight(0)
+	ui.closingHost.SetVisible(false)
+	ui.root.Append(ui.closingHost)
+
+	ui.slide = gtkmini.NewSlide()
+	ui.slide.SetHexpand(true)
+	ui.slide.SetHAlign(gtkmini.AlignFill)
+	ui.slide.SlideSetShowingDetail(false)
+	ui.slide.SlideSetProgress(1)
+	gtkmini.ClipSetChild(ui.detailHost, ui.slide)
 
 	ui.listPage = gtkmini.NewBox(gtkmini.OrientationVertical, 2)
+	ui.listPage.AddCSSClass("island-detail")
 	ui.listPage.AddCSSClass("detail-page")
-	ui.stack.StackAddNamed(ui.listPage, "list")
+	ui.listPage.SetHexpand(true)
+	ui.listPage.SetHAlign(gtkmini.AlignFill)
+	ui.listPage.ConnectClick(func() {
+		ui.pinPanel()
+	})
+	gtkmini.SlideSetListChild(ui.slide, ui.listPage)
 
 	ui.detailPage = gtkmini.NewBox(gtkmini.OrientationVertical, 2)
+	ui.detailPage.AddCSSClass("island-detail")
 	ui.detailPage.AddCSSClass("detail-page")
-	ui.stack.StackAddNamed(ui.detailPage, "detail")
+	ui.detailPage.SetHexpand(true)
+	ui.detailPage.SetHAlign(gtkmini.AlignFill)
+	ui.detailPage.ConnectClick(func() {
+		ui.pinPanel()
+	})
+	gtkmini.SlideSetDetailChild(ui.slide, ui.detailPage)
 	ui.setStackView(panelViewList)
+
+	ui.closingListPage = gtkmini.NewBox(gtkmini.OrientationVertical, 2)
+	ui.closingListPage.AddCSSClass("island-detail")
+	ui.closingListPage.AddCSSClass("detail-page")
+	ui.closingListPage.SetHexpand(true)
+	ui.closingListPage.SetHAlign(gtkmini.AlignFill)
+	gtkmini.ClipSetChild(ui.closingHost, ui.closingListPage)
 
 	ui.shell.ConnectHover(func() {
 		ui.onHoverEnter()
@@ -636,29 +1542,65 @@ func (ui *gtkUI) buildShellWidget() *gtkmini.Widget {
 	return ui.shell
 }
 
+func (ui *gtkUI) buildBackdropWidget() *gtkmini.Widget {
+	ui.backdrop = gtkmini.NewBox(gtkmini.OrientationVertical, 0)
+	ui.backdrop.AddCSSClass("click-capture")
+	ui.backdrop.SetHexpand(true)
+	ui.backdrop.SetVexpand(true)
+	ui.backdrop.SetHAlign(gtkmini.AlignFill)
+	ui.backdrop.SetVAlign(gtkmini.AlignFill)
+	ui.backdrop.ConnectClick(func() {
+		ui.closePanel()
+	})
+	return ui.backdrop
+}
+
 func (ui *gtkUI) onActivate() {
+	ui.backdropWindow = gtkmini.NewApplicationWindow(ui.app)
 	ui.window = gtkmini.NewApplicationWindow(ui.app)
 	ui.cssProvider = gtkmini.NewCSSProvider()
 	if ui.cssData != "" {
 		ui.cssProvider.LoadFromString(ui.cssData)
 	}
 
+	ui.backdropWindow.SetTitle("way-island-backdrop")
+	ui.backdropWindow.SetResizable(false)
+	ui.backdropWindow.SetDecorated(false)
 	ui.window.SetTitle("way-island")
 	ui.window.SetResizable(false)
 	ui.window.SetDecorated(false)
+	gtkmini.AddProviderForDisplay(ui.backdropWindow.Widget(), ui.cssProvider)
 	gtkmini.AddProviderForDisplay(ui.window.Widget(), ui.cssProvider)
+	if width, height, ok := gtkmini.DisplayFirstMonitorSize(ui.backdropWindow.Widget()); ok {
+		ui.backdropWindow.SetDefaultSize(width, height)
+	} else {
+		ui.backdropWindow.SetDefaultSize(4096, 4096)
+	}
 
+	backdrop := ui.buildBackdropWidget()
 	shell := ui.buildShellWidget()
 	if ui.shouldQuit {
 		ui.app.Quit()
 		return
 	}
 
+	ui.backdropWindow.Widget().AddCSSClass("way-island-window")
+	ui.backdropWindow.Widget().AddCSSClass("click-capture-window")
+	ui.backdropWindow.Widget().RemoveCSSClass("background")
+	ui.backdropWindow.Widget().RemoveCSSClass("solid-csd")
+	ui.backdropWindow.Widget().ConnectClick(func() {
+		ui.closePanel()
+	})
+	ui.backdropWindow.SetChild(backdrop)
+	gtkmini.LayerShellConfigureFullscreen(ui.backdropWindow)
+	ui.backdropWindow.Present()
+	ui.backdropWindow.Widget().SetVisible(false)
+
 	ui.window.Widget().AddCSSClass("way-island-window")
 	ui.window.Widget().RemoveCSSClass("background")
 	ui.window.Widget().RemoveCSSClass("solid-csd")
 	ui.window.SetChild(shell)
-	gtkmini.LayerShellConfigureTop(ui.window)
+	gtkmini.LayerShellConfigureOverlay(ui.window)
 	ui.window.Present()
 }
 
@@ -699,8 +1641,13 @@ func (ui *gtkUI) run() int {
 
 	status := ui.app.Run()
 	ui.cancelHoverClose()
+	ui.cancelPendingDetailOpen()
 	ui.stopWidthAnimation()
+	ui.stopDetailAnimation()
+	ui.stopSlideAnimation()
 	ui.widthAnimCurrent = 0
+	ui.closingActive = false
+	ui.wasExpanded = false
 	if ui.panelUpdateSource != 0 {
 		gtkmini.SourceRemove(ui.panelUpdateSource)
 		ui.panelUpdateSource = 0
@@ -711,14 +1658,18 @@ func (ui *gtkUI) run() int {
 	}
 	ui.app.Unref()
 
+	ui.backdropWindow = nil
 	ui.window = nil
+	ui.backdrop = nil
 	ui.shell = nil
 	ui.root = nil
 	ui.pill = nil
-	ui.revealer = nil
-	ui.stack = nil
+	ui.detailHost = nil
+	ui.closingHost = nil
+	ui.slide = nil
 	ui.listPage = nil
 	ui.detailPage = nil
+	ui.closingListPage = nil
 	ui.app = nil
 	ui.panelView = panelViewClosed
 	ui.stackView = panelViewList

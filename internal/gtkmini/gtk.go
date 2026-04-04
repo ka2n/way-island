@@ -13,10 +13,19 @@ package gtkmini
 
 extern void gtkminiInvokeVoid(uintptr_t handle);
 extern gboolean gtkminiInvokeSource(uintptr_t handle);
+extern gboolean gtkminiInvokeTick(uintptr_t handle, gint64 frame_time);
 extern void gtkminiHandleDelete(uintptr_t handle);
 
 GtkWidget *way_island_shell_new(void);
 void way_island_shell_set_child(GtkWidget *shell, GtkWidget *child);
+GtkWidget *way_island_clip_new(void);
+void way_island_clip_set_child(GtkWidget *clip, GtkWidget *child);
+void way_island_clip_set_height(GtkWidget *clip, int clip_height);
+GtkWidget *way_island_slide_new(void);
+void way_island_slide_set_list_child(GtkWidget *slide, GtkWidget *child);
+void way_island_slide_set_detail_child(GtkWidget *slide, GtkWidget *child);
+void way_island_slide_set_showing_detail(GtkWidget *slide, gboolean showing_detail);
+void way_island_slide_set_progress(GtkWidget *slide, double progress);
 
 static void gtkmini_destroy_notify(gpointer data, GClosure *closure) {
 	(void)closure;
@@ -30,6 +39,11 @@ static void gtkmini_activate_cb(GtkApplication *app, gpointer data) {
 
 static gboolean gtkmini_source_cb(gpointer data) {
 	return gtkminiInvokeSource((uintptr_t)data);
+}
+
+static gboolean gtkmini_tick_cb(GtkWidget *widget, GdkFrameClock *frame_clock, gpointer data) {
+	(void)widget;
+	return gtkminiInvokeTick((uintptr_t)data, gdk_frame_clock_get_frame_time(frame_clock));
 }
 
 static void gtkmini_click_cb(GtkGestureClick *gesture, gint n_press, gdouble x, gdouble y, gpointer data) {
@@ -60,6 +74,23 @@ static void gtkmini_hover_leave_cb(GtkEventControllerMotion *controller, gpointe
 static void gtkmini_notify_child_revealed_cb(GObject *object, GParamSpec *pspec, gpointer data) {
 	(void)object;
 	(void)pspec;
+	gtkminiInvokeVoid((uintptr_t)data);
+}
+
+static void gtkmini_notify_transition_running_cb(GObject *object, GParamSpec *pspec, gpointer data) {
+	(void)object;
+	(void)pspec;
+	gtkminiInvokeVoid((uintptr_t)data);
+}
+
+static void gtkmini_window_notify_is_active_cb(GObject *object, GParamSpec *pspec, gpointer data) {
+	(void)object;
+	(void)pspec;
+	gtkminiInvokeVoid((uintptr_t)data);
+}
+
+static void gtkmini_popover_closed_cb(GtkPopover *popover, gpointer data) {
+	(void)popover;
 	gtkminiInvokeVoid((uintptr_t)data);
 }
 
@@ -95,12 +126,24 @@ static void gtkmini_window_set_decorated(GtkWindow *window, gboolean decorated) 
 	gtk_window_set_decorated(window, decorated);
 }
 
+static void gtkmini_window_set_default_size(GtkWindow *window, gint width, gint height) {
+	gtk_window_set_default_size(window, width, height);
+}
+
 static void gtkmini_window_set_child(GtkWindow *window, GtkWidget *child) {
 	gtk_window_set_child(window, child);
 }
 
 static void gtkmini_window_present(GtkWindow *window) {
 	gtk_window_present(window);
+}
+
+static gboolean gtkmini_window_is_active(GtkWindow *window) {
+	return gtk_window_is_active(window);
+}
+
+static void gtkmini_window_connect_notify_is_active(GtkWindow *window, uintptr_t data) {
+	g_signal_connect_data(window, "notify::is-active", G_CALLBACK(gtkmini_window_notify_is_active_cb), (gpointer)data, gtkmini_destroy_notify, 0);
 }
 
 static void gtkmini_application_quit(GtkApplication *app) {
@@ -162,6 +205,10 @@ static void gtkmini_label_set_xalign(GtkWidget *label, gfloat xalign) {
 	gtk_label_set_xalign(GTK_LABEL(label), xalign);
 }
 
+static void gtkmini_label_set_text(GtkWidget *label, const char *text) {
+	gtk_label_set_text(GTK_LABEL(label), text != NULL ? text : "");
+}
+
 static void gtkmini_label_set_wrap(GtkWidget *label, gboolean wrap) {
 	gtk_label_set_wrap(GTK_LABEL(label), wrap);
 }
@@ -218,6 +265,37 @@ static void gtkmini_revealer_connect_child_revealed_notify(GtkWidget *revealer, 
 	g_signal_connect_data(revealer, "notify::child-revealed", G_CALLBACK(gtkmini_notify_child_revealed_cb), (gpointer)data, gtkmini_destroy_notify, 0);
 }
 
+static GtkWidget *gtkmini_popover_new(GtkWidget *parent) {
+	GtkWidget *popover = gtk_popover_new();
+	if (parent != NULL) {
+		gtk_widget_set_parent(popover, parent);
+	}
+	gtk_popover_set_autohide(GTK_POPOVER(popover), TRUE);
+	gtk_popover_set_has_arrow(GTK_POPOVER(popover), FALSE);
+	gtk_popover_set_position(GTK_POPOVER(popover), GTK_POS_BOTTOM);
+	return popover;
+}
+
+static void gtkmini_popover_set_child(GtkWidget *popover, GtkWidget *child) {
+	gtk_popover_set_child(GTK_POPOVER(popover), child);
+}
+
+static void gtkmini_popover_popup(GtkWidget *popover) {
+	gtk_popover_popup(GTK_POPOVER(popover));
+}
+
+static void gtkmini_popover_popdown(GtkWidget *popover) {
+	gtk_popover_popdown(GTK_POPOVER(popover));
+}
+
+static gboolean gtkmini_popover_get_visible(GtkWidget *popover) {
+	return gtk_widget_get_visible(popover);
+}
+
+static void gtkmini_popover_connect_closed(GtkWidget *popover, uintptr_t data) {
+	g_signal_connect_data(popover, "closed", G_CALLBACK(gtkmini_popover_closed_cb), (gpointer)data, gtkmini_destroy_notify, 0);
+}
+
 static GtkWidget *gtkmini_stack_new(void) {
 	return gtk_stack_new();
 }
@@ -250,6 +328,14 @@ static void gtkmini_stack_set_visible_child_name(GtkWidget *stack, const char *n
 	gtk_stack_set_visible_child_name(GTK_STACK(stack), name);
 }
 
+static gboolean gtkmini_stack_get_transition_running(GtkWidget *stack) {
+	return gtk_stack_get_transition_running(GTK_STACK(stack));
+}
+
+static void gtkmini_stack_connect_transition_running_notify(GtkWidget *stack, uintptr_t data) {
+	g_signal_connect_data(stack, "notify::transition-running", G_CALLBACK(gtkmini_notify_transition_running_cb), (gpointer)data, gtkmini_destroy_notify, 0);
+}
+
 static void gtkmini_widget_add_css_class(GtkWidget *widget, const char *css_class) {
 	gtk_widget_add_css_class(widget, css_class);
 }
@@ -260,6 +346,10 @@ static void gtkmini_widget_remove_css_class(GtkWidget *widget, const char *css_c
 
 static void gtkmini_widget_set_hexpand(GtkWidget *widget, gboolean expand) {
 	gtk_widget_set_hexpand(widget, expand);
+}
+
+static void gtkmini_widget_set_vexpand(GtkWidget *widget, gboolean expand) {
+	gtk_widget_set_vexpand(widget, expand);
 }
 
 static void gtkmini_widget_set_halign(GtkWidget *widget, GtkAlign align) {
@@ -274,8 +364,24 @@ static void gtkmini_widget_set_visible(GtkWidget *widget, gboolean visible) {
 	gtk_widget_set_visible(widget, visible);
 }
 
+static void gtkmini_widget_set_opacity(GtkWidget *widget, double opacity) {
+	gtk_widget_set_opacity(widget, opacity);
+}
+
 static void gtkmini_widget_set_tooltip_text(GtkWidget *widget, const char *text) {
 	gtk_widget_set_tooltip_text(widget, text);
+}
+
+static void gtkmini_widget_copy_to_clipboard(GtkWidget *widget, const char *text) {
+	GdkDisplay *display = gtk_widget_get_display(widget);
+	if (display == NULL) {
+		return;
+	}
+	GdkClipboard *clipboard = gdk_display_get_clipboard(display);
+	if (clipboard == NULL) {
+		return;
+	}
+	gdk_clipboard_set_text(clipboard, text != NULL ? text : "");
 }
 
 static void gtkmini_widget_queue_resize(GtkWidget *widget) {
@@ -286,8 +392,41 @@ static gint gtkmini_widget_get_width(GtkWidget *widget) {
 	return gtk_widget_get_width(widget);
 }
 
+static gint gtkmini_widget_get_height(GtkWidget *widget) {
+	return gtk_widget_get_height(widget);
+}
+
+static gint gtkmini_widget_measure_natural_height(GtkWidget *widget, gint for_width) {
+	gint minimum = 0;
+	gint natural = 0;
+	gtk_widget_measure(widget, GTK_ORIENTATION_VERTICAL, for_width, &minimum, &natural, NULL, NULL);
+	return natural;
+}
+
+static gint gtkmini_widget_measure_min_width(GtkWidget *widget) {
+	gint minimum = 0;
+	gint natural = 0;
+	gtk_widget_measure(widget, GTK_ORIENTATION_HORIZONTAL, -1, &minimum, &natural, NULL, NULL);
+	return minimum;
+}
+
+static gint gtkmini_widget_measure_natural_width(GtkWidget *widget) {
+	gint minimum = 0;
+	gint natural = 0;
+	gtk_widget_measure(widget, GTK_ORIENTATION_HORIZONTAL, -1, &minimum, &natural, NULL, NULL);
+	return natural;
+}
+
 static void gtkmini_widget_set_size_request(GtkWidget *widget, gint width, gint height) {
 	gtk_widget_set_size_request(widget, width, height);
+}
+
+static void gtkmini_widget_set_overflow_hidden(GtkWidget *widget) {
+	gtk_widget_set_overflow(widget, GTK_OVERFLOW_HIDDEN);
+}
+
+static void gtkmini_widget_set_margin_top(GtkWidget *widget, gint margin) {
+	gtk_widget_set_margin_top(widget, margin);
 }
 
 static void gtkmini_widget_add_click_controller(GtkWidget *widget, uintptr_t data) {
@@ -309,6 +448,14 @@ static guint gtkmini_idle_add(uintptr_t data) {
 
 static guint gtkmini_timeout_add(guint interval_ms, uintptr_t data) {
 	return g_timeout_add(interval_ms, gtkmini_source_cb, (gpointer)data);
+}
+
+static guint gtkmini_widget_add_tick_callback(GtkWidget *widget, uintptr_t data) {
+	return gtk_widget_add_tick_callback(widget, gtkmini_tick_cb, (gpointer)data, NULL);
+}
+
+static void gtkmini_widget_remove_tick_callback(GtkWidget *widget, guint id) {
+	gtk_widget_remove_tick_callback(widget, id);
 }
 
 static gboolean gtkmini_source_remove(guint source_id) {
@@ -388,6 +535,39 @@ static gboolean gtkmini_layer_is_supported(void) {
 	return gtk_layer_is_supported();
 }
 
+static gboolean gtkmini_display_get_first_monitor_size(GtkWidget *widget, gint *width, gint *height) {
+	GdkDisplay *display;
+	GListModel *monitors;
+	GdkMonitor *monitor;
+	GdkRectangle geometry;
+
+	if (widget == NULL || width == NULL || height == NULL) {
+		return FALSE;
+	}
+
+	display = gtk_widget_get_display(widget);
+	if (display == NULL) {
+		return FALSE;
+	}
+
+	monitors = gdk_display_get_monitors(display);
+	if (monitors == NULL || g_list_model_get_n_items(monitors) == 0) {
+		return FALSE;
+	}
+
+	monitor = GDK_MONITOR(g_list_model_get_item(monitors, 0));
+	if (monitor == NULL) {
+		return FALSE;
+	}
+
+	gdk_monitor_get_geometry(monitor, &geometry);
+	g_object_unref(monitor);
+
+	*width = geometry.width;
+	*height = geometry.height;
+	return geometry.width > 0 && geometry.height > 0;
+}
+
 static void gtkmini_layer_init_for_window(GtkWindow *window) {
 	gtk_layer_init_for_window(window);
 }
@@ -401,16 +581,42 @@ static void gtkmini_layer_configure_top_window(GtkWindow *window) {
 	gtk_layer_set_exclusive_zone(window, 0);
 	gtk_layer_set_margin(window, GTK_LAYER_SHELL_EDGE_TOP, 0);
 }
+
+static void gtkmini_layer_configure_overlay_window(GtkWindow *window) {
+	gtk_layer_set_layer(window, GTK_LAYER_SHELL_LAYER_OVERLAY);
+	gtk_layer_set_anchor(window, GTK_LAYER_SHELL_EDGE_TOP, TRUE);
+	gtk_layer_set_anchor(window, GTK_LAYER_SHELL_EDGE_LEFT, FALSE);
+	gtk_layer_set_anchor(window, GTK_LAYER_SHELL_EDGE_RIGHT, FALSE);
+	gtk_layer_set_keyboard_mode(window, GTK_LAYER_SHELL_KEYBOARD_MODE_NONE);
+	gtk_layer_set_exclusive_zone(window, 0);
+	gtk_layer_set_margin(window, GTK_LAYER_SHELL_EDGE_TOP, 0);
+}
+
+static void gtkmini_layer_configure_fullscreen_window(GtkWindow *window) {
+	gtk_layer_set_layer(window, GTK_LAYER_SHELL_LAYER_TOP);
+	gtk_layer_set_anchor(window, GTK_LAYER_SHELL_EDGE_TOP, TRUE);
+	gtk_layer_set_anchor(window, GTK_LAYER_SHELL_EDGE_BOTTOM, TRUE);
+	gtk_layer_set_anchor(window, GTK_LAYER_SHELL_EDGE_LEFT, TRUE);
+	gtk_layer_set_anchor(window, GTK_LAYER_SHELL_EDGE_RIGHT, TRUE);
+	gtk_layer_set_keyboard_mode(window, GTK_LAYER_SHELL_KEYBOARD_MODE_NONE);
+	gtk_layer_set_exclusive_zone(window, 0);
+	gtk_layer_set_margin(window, GTK_LAYER_SHELL_EDGE_TOP, 0);
+	gtk_layer_set_margin(window, GTK_LAYER_SHELL_EDGE_BOTTOM, 0);
+	gtk_layer_set_margin(window, GTK_LAYER_SHELL_EDGE_LEFT, 0);
+	gtk_layer_set_margin(window, GTK_LAYER_SHELL_EDGE_RIGHT, 0);
+}
 */
 import "C"
 
 import (
 	"runtime/cgo"
 	"sync"
+	"time"
 	"unsafe"
 )
 
 type SourceID uint
+type TickCallbackID uint
 
 type Application struct {
 	ptr *C.GtkApplication
@@ -463,6 +669,7 @@ const (
 )
 
 var sourceHandles sync.Map
+var tickCallbackHandles sync.Map
 
 func cString(value string) (*C.char, func()) {
 	cvalue := C.CString(value)
@@ -506,6 +713,30 @@ func gtkminiInvokeSource(handle C.uintptr_t) C.gboolean {
 	})
 	if matchedKey != nil {
 		sourceHandles.Delete(matchedKey)
+	}
+
+	return 0
+}
+
+//export gtkminiInvokeTick
+func gtkminiInvokeTick(handle C.uintptr_t, frameTime C.gint64) C.gboolean {
+	h := cgo.Handle(handle)
+	keep := h.Value().(func(int64) bool)(int64(frameTime))
+	if keep {
+		return 1
+	}
+
+	h.Delete()
+	var matchedKey any
+	tickCallbackHandles.Range(func(key, value any) bool {
+		if value == handle {
+			matchedKey = key
+			return false
+		}
+		return true
+	})
+	if matchedKey != nil {
+		tickCallbackHandles.Delete(matchedKey)
 	}
 
 	return 0
@@ -564,12 +795,24 @@ func (w *Window) SetDecorated(value bool) {
 	C.gtkmini_window_set_decorated(w.ptr, boolToGBoolean(value))
 }
 
+func (w *Window) SetDefaultSize(width, height int) {
+	C.gtkmini_window_set_default_size(w.ptr, C.gint(width), C.gint(height))
+}
+
 func (w *Window) SetChild(child *Widget) {
 	C.gtkmini_window_set_child(w.ptr, child.ptr)
 }
 
 func (w *Window) Present() {
 	C.gtkmini_window_present(w.ptr)
+}
+
+func (w *Window) IsActive() bool {
+	return C.gtkmini_window_is_active(w.ptr) != 0
+}
+
+func (w *Window) ConnectNotifyIsActive(fn func()) {
+	C.gtkmini_window_connect_notify_is_active(w.ptr, newHandle(fn))
 }
 
 func NewCSSProvider() *CSSProvider {
@@ -598,6 +841,38 @@ func ShellSetChild(shell, child *Widget) {
 	C.way_island_shell_set_child(shell.ptr, child.ptr)
 }
 
+func NewClip() *Widget {
+	return &Widget{ptr: C.way_island_clip_new()}
+}
+
+func ClipSetChild(clip, child *Widget) {
+	C.way_island_clip_set_child(clip.ptr, child.ptr)
+}
+
+func (w *Widget) ClipSetHeight(height int) {
+	C.way_island_clip_set_height(w.ptr, C.int(height))
+}
+
+func NewSlide() *Widget {
+	return &Widget{ptr: C.way_island_slide_new()}
+}
+
+func SlideSetListChild(slide, child *Widget) {
+	C.way_island_slide_set_list_child(slide.ptr, child.ptr)
+}
+
+func SlideSetDetailChild(slide, child *Widget) {
+	C.way_island_slide_set_detail_child(slide.ptr, child.ptr)
+}
+
+func (w *Widget) SlideSetShowingDetail(showing bool) {
+	C.way_island_slide_set_showing_detail(w.ptr, boolToGBoolean(showing))
+}
+
+func (w *Widget) SlideSetProgress(progress float64) {
+	C.way_island_slide_set_progress(w.ptr, C.double(progress))
+}
+
 func NewBox(orientation Orientation, spacing int) *Widget {
 	return &Widget{ptr: C.gtkmini_box_new(C.GtkOrientation(orientation), C.gint(spacing))}
 }
@@ -618,6 +893,12 @@ func NewLabel(text string) *Widget {
 
 func (w *Widget) LabelSetXAlign(value float32) {
 	C.gtkmini_label_set_xalign(w.ptr, C.gfloat(value))
+}
+
+func (w *Widget) LabelSetText(value string) {
+	cvalue, free := cString(value)
+	defer free()
+	C.gtkmini_label_set_text(w.ptr, cvalue)
 }
 
 func (w *Widget) LabelSetWrap(value bool) {
@@ -680,6 +961,34 @@ func (w *Widget) ConnectNotifyChildRevealed(fn func()) {
 	C.gtkmini_revealer_connect_child_revealed_notify(w.ptr, newHandle(fn))
 }
 
+func NewPopover(parent *Widget) *Widget {
+	var parentPtr *C.GtkWidget
+	if parent != nil {
+		parentPtr = parent.ptr
+	}
+	return &Widget{ptr: C.gtkmini_popover_new(parentPtr)}
+}
+
+func (w *Widget) PopoverSetChild(child *Widget) {
+	C.gtkmini_popover_set_child(w.ptr, child.ptr)
+}
+
+func (w *Widget) PopoverPopup() {
+	C.gtkmini_popover_popup(w.ptr)
+}
+
+func (w *Widget) PopoverPopdown() {
+	C.gtkmini_popover_popdown(w.ptr)
+}
+
+func (w *Widget) PopoverVisible() bool {
+	return C.gtkmini_popover_get_visible(w.ptr) != 0
+}
+
+func (w *Widget) ConnectPopoverClosed(fn func()) {
+	C.gtkmini_popover_connect_closed(w.ptr, newHandle(fn))
+}
+
 func NewStack() *Widget {
 	return &Widget{ptr: C.gtkmini_stack_new()}
 }
@@ -716,6 +1025,14 @@ func (w *Widget) StackSetVisibleChildName(name string) {
 	C.gtkmini_stack_set_visible_child_name(w.ptr, cname)
 }
 
+func (w *Widget) StackGetTransitionRunning() bool {
+	return C.gtkmini_stack_get_transition_running(w.ptr) != 0
+}
+
+func (w *Widget) ConnectNotifyStackTransitionRunning(fn func()) {
+	C.gtkmini_stack_connect_transition_running_notify(w.ptr, newHandle(fn))
+}
+
 func (w *Widget) AddCSSClass(cssClass string) {
 	ccss, free := cString(cssClass)
 	defer free()
@@ -732,6 +1049,10 @@ func (w *Widget) SetHexpand(value bool) {
 	C.gtkmini_widget_set_hexpand(w.ptr, boolToGBoolean(value))
 }
 
+func (w *Widget) SetVexpand(value bool) {
+	C.gtkmini_widget_set_vexpand(w.ptr, boolToGBoolean(value))
+}
+
 func (w *Widget) SetHAlign(value Align) {
 	C.gtkmini_widget_set_halign(w.ptr, C.GtkAlign(value))
 }
@@ -744,10 +1065,20 @@ func (w *Widget) SetVisible(value bool) {
 	C.gtkmini_widget_set_visible(w.ptr, boolToGBoolean(value))
 }
 
+func (w *Widget) SetOpacity(value float64) {
+	C.gtkmini_widget_set_opacity(w.ptr, C.double(value))
+}
+
 func (w *Widget) SetTooltipText(text string) {
 	ctext, free := cString(text)
 	defer free()
 	C.gtkmini_widget_set_tooltip_text(w.ptr, ctext)
+}
+
+func (w *Widget) CopyToClipboard(text string) {
+	ctext, free := cString(text)
+	defer free()
+	C.gtkmini_widget_copy_to_clipboard(w.ptr, ctext)
 }
 
 func (w *Widget) QueueResize() {
@@ -758,8 +1089,32 @@ func (w *Widget) Width() int {
 	return int(C.gtkmini_widget_get_width(w.ptr))
 }
 
+func (w *Widget) Height() int {
+	return int(C.gtkmini_widget_get_height(w.ptr))
+}
+
+func (w *Widget) MeasureNaturalHeight(forWidth int) int {
+	return int(C.gtkmini_widget_measure_natural_height(w.ptr, C.gint(forWidth)))
+}
+
+func (w *Widget) MeasureMinWidth() int {
+	return int(C.gtkmini_widget_measure_min_width(w.ptr))
+}
+
+func (w *Widget) MeasureNaturalWidth() int {
+	return int(C.gtkmini_widget_measure_natural_width(w.ptr))
+}
+
 func (w *Widget) SetSizeRequest(width, height int) {
 	C.gtkmini_widget_set_size_request(w.ptr, C.gint(width), C.gint(height))
+}
+
+func (w *Widget) SetOverflowHidden() {
+	C.gtkmini_widget_set_overflow_hidden(w.ptr)
+}
+
+func (w *Widget) SetMarginTop(value int) {
+	C.gtkmini_widget_set_margin_top(w.ptr, C.gint(value))
 }
 
 func (w *Widget) ConnectClick(fn func()) {
@@ -768,6 +1123,56 @@ func (w *Widget) ConnectClick(fn func()) {
 
 func (w *Widget) ConnectHover(enter, leave func()) {
 	C.gtkmini_widget_add_hover_controller(w.ptr, newHandle(enter), newHandle(leave))
+}
+
+func (w *Widget) AddTickCallback(fn func(frameTimeMicros int64) bool) TickCallbackID {
+	handle := cgo.NewHandle(fn)
+	callbackID := TickCallbackID(C.gtkmini_widget_add_tick_callback(w.ptr, C.uintptr_t(handle)))
+	tickCallbackHandles.Store(callbackID, C.uintptr_t(handle))
+	return callbackID
+}
+
+func (w *Widget) AddTimedAnimation(duration time.Duration, fn func(progress float64) bool) TickCallbackID {
+	durationMicros := int64(duration / time.Microsecond)
+	if durationMicros <= 0 {
+		durationMicros = 1
+	}
+
+	var startMicros int64
+	return w.AddTickCallback(func(frameTimeMicros int64) bool {
+		if startMicros == 0 {
+			startMicros = frameTimeMicros
+		}
+
+		elapsedMicros := frameTimeMicros - startMicros
+		if elapsedMicros < 0 {
+			elapsedMicros = 0
+		}
+
+		progress := float64(elapsedMicros) / float64(durationMicros)
+		if progress < 0 {
+			progress = 0
+		}
+		if progress > 1 {
+			progress = 1
+		}
+
+		keep := fn(progress)
+		if progress >= 1 {
+			return false
+		}
+		return keep
+	})
+}
+
+func (w *Widget) RemoveTickCallback(callbackID TickCallbackID) {
+	if callbackID == 0 {
+		return
+	}
+	C.gtkmini_widget_remove_tick_callback(w.ptr, C.guint(callbackID))
+	if handle, ok := tickCallbackHandles.LoadAndDelete(callbackID); ok {
+		cgo.Handle(handle.(C.uintptr_t)).Delete()
+	}
 }
 
 func IdleAdd(fn func()) SourceID {
@@ -807,6 +1212,13 @@ func ApplyCSS(widget *Widget, css string) {
 	C.gtkmini_apply_css(widget.ptr, ccss)
 }
 
+func PumpEvents(iterations int) {
+	if iterations < 0 {
+		iterations = 0
+	}
+	C.gtkmini_pump_events(C.gint(iterations))
+}
+
 func SaveWidgetPNG(window *Window, widget *Widget, path string) bool {
 	cpath, free := cString(path)
 	defer free()
@@ -820,4 +1232,29 @@ func LayerShellConfigureTop(window *Window) {
 
 	C.gtkmini_layer_init_for_window(window.ptr)
 	C.gtkmini_layer_configure_top_window(window.ptr)
+}
+
+func LayerShellConfigureOverlay(window *Window) {
+	if C.gtkmini_layer_is_supported() == 0 {
+		return
+	}
+
+	C.gtkmini_layer_init_for_window(window.ptr)
+	C.gtkmini_layer_configure_overlay_window(window.ptr)
+}
+
+func LayerShellConfigureFullscreen(window *Window) {
+	if C.gtkmini_layer_is_supported() == 0 {
+		return
+	}
+
+	C.gtkmini_layer_init_for_window(window.ptr)
+	C.gtkmini_layer_configure_fullscreen_window(window.ptr)
+}
+
+func DisplayFirstMonitorSize(widget *Widget) (int, int, bool) {
+	var width C.gint
+	var height C.gint
+	ok := C.gtkmini_display_get_first_monitor_size(widget.ptr, &width, &height) != 0
+	return int(width), int(height), ok
 }
