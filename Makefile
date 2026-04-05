@@ -7,7 +7,7 @@ ifneq ($(strip $(SNAPSHOT)),)
 SNAPSHOT_TEST_PATTERN := TestGTKSnapshot$(SNAPSHOT)
 endif
 
-.PHONY: build run test test-snapshot test-snapshot-update test-snapshot-clean vet lint check clean install
+.PHONY: build run test test-snapshot test-snapshot-update test-snapshot-clean vet lint check clean install rvinspect-build rvinspect-run
 
 build:
 	nix develop -c go build $(GOFLAGS) -o $(BINARY) .
@@ -45,3 +45,9 @@ install:
 	-systemctl --user daemon-reload >/dev/null 2>&1
 	@printf '%s\n' 'Installed way-island to the current nix profile.'
 	@printf '%s\n' 'To enable the user service: systemctl --user enable --now way-island.service'
+
+rvinspect-build:
+	nix develop --no-write-lock-file -c bash -lc 'cd tools/rvinspect && zig build'
+
+rvinspect-run:
+	nix develop --no-write-lock-file -c bash -lc 'cd tools/rvinspect && zig build run -- $(ARGS)'

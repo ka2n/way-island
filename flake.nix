@@ -38,6 +38,9 @@
             gtk4
             gtk4-layer-shell
             pkg-config
+            wayland
+            wayland-scanner
+            zig
             xauth
             xorg-server
             wlrctl
