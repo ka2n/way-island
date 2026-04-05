@@ -8,7 +8,7 @@ import (
 )
 
 func TestWriteOverlayPNGCollapsedEmptyState(t *testing.T) {
-	vm := buildOverlayViewModel("", panelViewClosed, "")
+	vm := buildOverlayViewModel("", panelViewClosed, "", false)
 	path := renderTestOutputPath(t, "empty.png")
 
 	if err := writeOverlayPNG(path, vm); err != nil {
@@ -43,7 +43,7 @@ func TestWriteOverlayPNGListState(t *testing.T) {
 		{ID: "session-1", Name: "Alpha", State: "waiting", Action: "Approval needed"},
 		{ID: "session-2", Name: "Beta", State: "working", Action: ""},
 	})
-	vm := buildOverlayViewModel(payload, panelViewList, "")
+	vm := buildOverlayViewModel(payload, panelViewList, "", false)
 	path := renderTestOutputPath(t, "list.png")
 
 	if err := writeOverlayPNG(path, vm); err != nil {
@@ -72,7 +72,7 @@ func TestWriteOverlayPNGDetailState(t *testing.T) {
 		{ID: "session-1", Name: "Alpha", State: "working", Action: "Running tests"},
 		{ID: "session-2", Name: "Beta", State: "idle", Action: ""},
 	})
-	vm := buildOverlayViewModel(payload, panelViewDetail, "session-1")
+	vm := buildOverlayViewModel(payload, panelViewDetail, "session-1", false)
 	path := renderTestOutputPath(t, "detail.png")
 
 	if err := writeOverlayPNG(path, vm); err != nil {

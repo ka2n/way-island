@@ -8,7 +8,7 @@ import (
 )
 
 func TestBuildOverlayViewModelEmptyState(t *testing.T) {
-	vm := buildOverlayViewModel("", panelViewClosed, "")
+	vm := buildOverlayViewModel("", panelViewClosed, "", false)
 
 	if vm.HasSessions {
 		t.Fatalf("expected no sessions")
@@ -34,7 +34,7 @@ func TestBuildOverlayViewModelListState(t *testing.T) {
 		{ID: "session-2", Name: "Beta", State: "working", Action: ""},
 	})
 
-	vm := buildOverlayViewModel(payload, panelViewList, "")
+	vm := buildOverlayViewModel(payload, panelViewList, "", false)
 
 	if !vm.HasSessions {
 		t.Fatalf("expected sessions")
@@ -62,13 +62,34 @@ func TestBuildOverlayViewModelListState(t *testing.T) {
 	}
 }
 
+func TestBuildOverlayViewModelBackdropActive(t *testing.T) {
+	payload := encodePayloadSessions([]payloadSession{
+		{ID: "session-1", Name: "Alpha", State: "waiting", Action: "Approval needed"},
+	})
+
+	vm := buildOverlayViewModel(payload, panelViewList, "", true)
+	if !vm.BackdropActive {
+		t.Fatalf("BackdropActive = false, want true")
+	}
+
+	vm = buildOverlayViewModel(payload, panelViewClosed, "", true)
+	if vm.BackdropActive {
+		t.Fatalf("BackdropActive = true, want false when panel is closed")
+	}
+
+	vm = buildOverlayViewModel(payload, panelViewList, "", false)
+	if vm.BackdropActive {
+		t.Fatalf("BackdropActive = true, want false when panel is not pinned")
+	}
+}
+
 func TestBuildOverlayViewModelPrefixesClaudeDisplayName(t *testing.T) {
 	payload := encodePayloadSessions([]payloadSession{
 		{ID: "session-1", Name: "Alpha", State: "working", Action: "Running tests", HookSource: "claude"},
 		{ID: "session-2", Name: "Beta", State: "idle", Action: "", HookSource: "codex"},
 	})
 
-	vm := buildOverlayViewModel(payload, panelViewDetail, "session-1")
+	vm := buildOverlayViewModel(payload, panelViewDetail, "session-1", false)
 
 	if vm.Pill.Title != "✳ Alpha" {
 		t.Fatalf("pill title = %q, want %q", vm.Pill.Title, "✳ Alpha")
@@ -93,7 +114,7 @@ func TestBuildOverlayViewModelDetailState(t *testing.T) {
 		{ID: "session-2", Name: "Beta", State: "idle", Action: "", AgentNickname: "Builder", HookSource: "codex"},
 	})
 
-	vm := buildOverlayViewModel(payload, panelViewDetail, "session-2")
+	vm := buildOverlayViewModel(payload, panelViewDetail, "session-2", false)
 
 	if !vm.Expanded {
 		t.Fatalf("expected expanded detail state")
@@ -123,7 +144,7 @@ func TestBuildOverlayViewModelDetailStateForClaude(t *testing.T) {
 		{ID: "session-1", Name: "Alpha", State: "working", Action: "Running tests", HookSource: "claude", AgentNickname: "Ignored"},
 	})
 
-	vm := buildOverlayViewModel(payload, panelViewDetail, "session-1")
+	vm := buildOverlayViewModel(payload, panelViewDetail, "session-1", false)
 
 	if vm.Detail == nil {
 		t.Fatalf("expected detail view")
@@ -142,7 +163,7 @@ func TestBuildOverlayViewModelDetailFallsBackToPrimarySession(t *testing.T) {
 		{ID: "session-2", Name: "Beta", State: "idle", Action: ""},
 	})
 
-	vm := buildOverlayViewModel(payload, panelViewDetail, "missing-session")
+	vm := buildOverlayViewModel(payload, panelViewDetail, "missing-session", false)
 
 	if vm.Detail == nil {
 		t.Fatalf("expected detail view")
@@ -166,7 +187,7 @@ func TestBuildOverlayViewModelDetailIncludesSubagents(t *testing.T) {
 		}},
 	})
 
-	vm := buildOverlayViewModel(payload, panelViewDetail, "session-1")
+	vm := buildOverlayViewModel(payload, panelViewDetail, "session-1", false)
 	if vm.Detail == nil {
 		t.Fatalf("expected detail view")
 	}

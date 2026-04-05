@@ -79,59 +79,63 @@ func (ui *gtkUI) currentDetailAnimationDuration() time.Duration {
 }
 
 type gtkUI struct {
-	app                *gtkmini.Application
-	backdropWindow     *gtkmini.Window
-	window             *gtkmini.Window
-	backdrop           *gtkmini.Widget
-	shell              *gtkmini.Widget
-	root               *gtkmini.Widget
-	pill               *gtkmini.Widget
-	detailHost         *gtkmini.Widget
-	closingHost        *gtkmini.Widget
-	slide              *gtkmini.Widget
-	listPage           *gtkmini.Widget
-	detailPage         *gtkmini.Widget
-	closingListPage    *gtkmini.Widget
-	cssProvider        *gtkmini.CSSProvider
-	sessionsPayload    string
-	selectedSessionID  string
-	cssData            string
-	shouldQuit         bool
-	panelView          int
-	stackView          int
-	pendingPanelView   int
-	panelUpdateSource  gtkmini.SourceID
-	hoverCloseSource   gtkmini.SourceID
-	backdropAnimSource gtkmini.SourceID
-	widthAnimSource    gtkmini.SourceID
-	detailAnimSource   gtkmini.SourceID
-	detailOpenSource   gtkmini.SourceID
-	slideAnimSource    gtkmini.SourceID
-	widthAnimFrom      int
-	widthAnimTo        int
-	widthAnimCurrent   int
-	detailAnimFrom     int
-	detailAnimTo       int
-	slideAnimFrom      float64
-	slideAnimTo        float64
-	cachedListWidth    int
-	cachedDetailWidth  int
-	cachedListHeight   int
-	cachedDetailHeight int
-	closingActive      bool
-	listDetailAnimating bool
-	listTransitionMode int
-	wasExpanded        bool
-	panelPinned        bool
-	showingDetail      bool
+	app                  *gtkmini.Application
+	backdropWindow       *gtkmini.Window
+	window               *gtkmini.Window
+	backdrop             *gtkmini.Widget
+	shell                *gtkmini.Widget
+	root                 *gtkmini.Widget
+	pill                 *gtkmini.Widget
+	detailHost           *gtkmini.Widget
+	closingHost          *gtkmini.Widget
+	slide                *gtkmini.Widget
+	listPage             *gtkmini.Widget
+	detailPage           *gtkmini.Widget
+	closingListPage      *gtkmini.Widget
+	cssProvider          *gtkmini.CSSProvider
+	sessionsPayload      string
+	selectedSessionID    string
+	cssData              string
+	shouldQuit           bool
+	panelView            int
+	stackView            int
+	pendingPanelView     int
+	panelUpdateSource    gtkmini.SourceID
+	hoverCloseSource     gtkmini.SourceID
+	backdropAnimSource   gtkmini.SourceID
+	backdropOpacity      float64
+	backdropTargetActive bool
+	widthAnimSource      gtkmini.SourceID
+	detailAnimSource     gtkmini.SourceID
+	detailOpenSource     gtkmini.SourceID
+	slideAnimSource      gtkmini.SourceID
+	widthAnimFrom        int
+	widthAnimTo          int
+	widthAnimCurrent     int
+	detailAnimFrom       int
+	detailAnimTo         int
+	slideAnimFrom        float64
+	slideAnimTo          float64
+	cachedListWidth      int
+	cachedDetailWidth    int
+	cachedListHeight     int
+	cachedDetailHeight   int
+	closingActive        bool
+	listDetailAnimating  bool
+	listTransitionMode   int
+	wasExpanded          bool
+	panelPinned          bool
+	showingDetail        bool
 }
 
 func newGTKUI() *gtkUI {
 	debugAnimationLog("%s=1", animationDebugEnv)
 	return &gtkUI{
-		panelView:        panelViewClosed,
-		stackView:        panelViewList,
-		pendingPanelView: -1,
+		panelView:            panelViewClosed,
+		stackView:            panelViewList,
+		pendingPanelView:     -1,
+		backdropOpacity:      0,
+		backdropTargetActive: false,
 	}
 }
 
@@ -256,9 +260,11 @@ func (ui *gtkUI) animateBackdropOpacity(from, to float64, hideWhenDone bool) {
 	ui.stopBackdropAnimation()
 	ui.backdropWindow.Widget().SetVisible(true)
 	ui.backdrop.SetOpacity(from)
+	ui.backdropOpacity = from
 
 	if from == to {
 		ui.backdrop.SetOpacity(to)
+		ui.backdropOpacity = to
 		if hideWhenDone && to <= 0 {
 			ui.backdropWindow.Widget().SetVisible(false)
 		}
@@ -278,9 +284,11 @@ func (ui *gtkUI) animateBackdropOpacity(from, to float64, hideWhenDone bool) {
 		eased := easeOutCubic(progress)
 		opacity := from + (to-from)*eased
 		ui.backdrop.SetOpacity(opacity)
+		ui.backdropOpacity = opacity
 		if progress >= 1 {
 			ui.backdropAnimSource = 0
 			ui.backdrop.SetOpacity(to)
+			ui.backdropOpacity = to
 			if hideWhenDone && to <= 0 {
 				ui.backdropWindow.Widget().SetVisible(false)
 			}
@@ -290,12 +298,11 @@ func (ui *gtkUI) animateBackdropOpacity(from, to float64, hideWhenDone bool) {
 	})
 }
 
-func (ui *gtkUI) syncBackdropVisibility() {
+func (ui *gtkUI) syncBackdropVisibility(active bool) {
 	if ui.backdropWindow == nil {
 		return
 	}
 
-	active := ui.panelPinned && ui.panelView != panelViewClosed && strings.TrimSpace(ui.sessionsPayload) != ""
 	if ui.backdrop == nil {
 		ui.backdropWindow.Widget().SetVisible(active)
 		return
@@ -303,12 +310,30 @@ func (ui *gtkUI) syncBackdropVisibility() {
 
 	if active {
 		ui.backdrop.AddCSSClass("active")
-		ui.animateBackdropOpacity(0, 1, false)
+		if ui.backdropTargetActive {
+			if ui.backdropAnimSource == 0 && ui.backdropOpacity != 1 {
+				ui.backdrop.SetOpacity(1)
+				ui.backdropOpacity = 1
+			}
+			return
+		}
+		ui.backdropTargetActive = true
+		ui.animateBackdropOpacity(ui.backdropOpacity, 1, false)
 		return
 	}
 
+	if !ui.backdropTargetActive {
+		ui.backdrop.RemoveCSSClass("active")
+		if ui.backdropAnimSource == 0 && ui.backdropOpacity != 0 {
+			ui.backdrop.SetOpacity(0)
+			ui.backdropOpacity = 0
+		}
+		return
+	}
+
+	ui.backdropTargetActive = false
 	ui.backdrop.RemoveCSSClass("active")
-	ui.animateBackdropOpacity(1, 0, true)
+	ui.animateBackdropOpacity(ui.backdropOpacity, 0, true)
 }
 
 func (ui *gtkUI) stopDetailAnimation() {
@@ -1391,7 +1416,7 @@ func (ui *gtkUI) rebuildUI(payload string) {
 
 	animateWidth := ui.shell.Width() > 0
 	sessions := parsePayloadSessions(payload)
-	vm := buildOverlayViewModel(payload, ui.panelView, ui.selectedSessionID)
+	vm := buildOverlayViewModel(payload, ui.panelView, ui.selectedSessionID, ui.panelPinned)
 
 	ui.shell.AddCSSClass("island-pill")
 	if !vm.HasSessions {
@@ -1409,7 +1434,7 @@ func (ui *gtkUI) rebuildUI(payload string) {
 	}
 
 	ui.rebuildPill(sessions, vm.Pill)
-	ui.syncBackdropVisibility()
+	ui.syncBackdropVisibility(vm.BackdropActive)
 	debugAnimationLog("rebuildUI panel=%d stackView=%d hasSessions=%v animateWidth=%v closingActive=%v mode=%d wasExpanded=%v pinned=%v shellWidth=%d", ui.panelView, ui.stackView, vm.HasSessions, animateWidth, ui.closingActive, ui.listTransitionMode, ui.wasExpanded, ui.panelPinned, ui.shell.Width())
 
 	if ui.closingActive {
@@ -1458,7 +1483,7 @@ func (ui *gtkUI) rebuildUI(payload string) {
 		ui.hideFrozenListHost()
 		closedWidth := ui.closedShellWidth()
 		ui.applyShellWidth(closedWidth)
-		ui.syncBackdropVisibility()
+		ui.syncBackdropVisibility(vm.BackdropActive)
 		return
 	}
 	ui.wasExpanded = false
@@ -1471,7 +1496,7 @@ func (ui *gtkUI) rebuildUI(payload string) {
 	if currentHeight > 0 && ui.closingListPage != nil {
 		ui.startFrozenListClose(sessions, currentHeight, animateWidth)
 	}
-	ui.syncBackdropVisibility()
+	ui.syncBackdropVisibility(vm.BackdropActive)
 }
 
 func (ui *gtkUI) buildShellWidget() *gtkmini.Widget {
@@ -1549,6 +1574,7 @@ func (ui *gtkUI) buildShellWidget() *gtkmini.Widget {
 func (ui *gtkUI) buildBackdropWidget() *gtkmini.Widget {
 	ui.backdrop = gtkmini.NewBox(gtkmini.OrientationVertical, 0)
 	ui.backdrop.AddCSSClass("click-capture")
+	ui.backdrop.SetOpacity(0)
 	ui.backdrop.SetHexpand(true)
 	ui.backdrop.SetVexpand(true)
 	ui.backdrop.SetHAlign(gtkmini.AlignFill)
@@ -1597,8 +1623,8 @@ func (ui *gtkUI) onActivate() {
 	})
 	ui.backdropWindow.SetChild(backdrop)
 	gtkmini.LayerShellConfigureFullscreen(ui.backdropWindow)
-	ui.backdropWindow.Present()
 	ui.backdropWindow.Widget().SetVisible(false)
+	ui.backdropWindow.Present()
 
 	ui.window.Widget().AddCSSClass("way-island-window")
 	ui.window.Widget().RemoveCSSClass("background")

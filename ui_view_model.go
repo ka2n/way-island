@@ -47,13 +47,14 @@ type detailViewModel struct {
 }
 
 type overlayViewModel struct {
-	HasSessions bool
-	Pill        pillViewModel
-	ListTitle   string
-	ListRows    []sessionRowViewModel
-	Expanded    bool
-	StackView   int
-	Detail      *detailViewModel
+	HasSessions    bool
+	Pill           pillViewModel
+	ListTitle      string
+	ListRows       []sessionRowViewModel
+	Expanded       bool
+	StackView      int
+	BackdropActive bool
+	Detail         *detailViewModel
 }
 
 type payloadSession struct {
@@ -76,15 +77,16 @@ type payloadSubagent struct {
 	State       string `json:"state,omitempty"`
 }
 
-func buildOverlayViewModel(payload string, panelView int, selectedSessionID string) overlayViewModel {
+func buildOverlayViewModel(payload string, panelView int, selectedSessionID string, panelPinned bool) overlayViewModel {
 	sessions := parsePayloadSessions(payload)
 	hasSessions := len(sessions) > 0
 
 	vm := overlayViewModel{
-		HasSessions: hasSessions,
-		Pill:        buildPillViewModel(sessions),
-		ListTitle:   "Sessions",
-		ListRows:    buildListRowsViewModel(sessions),
+		HasSessions:    hasSessions,
+		Pill:           buildPillViewModel(sessions),
+		ListTitle:      "Sessions",
+		ListRows:       buildListRowsViewModel(sessions),
+		BackdropActive: panelPinned && hasSessions && panelView != panelViewClosed,
 	}
 
 	if !hasSessions {
