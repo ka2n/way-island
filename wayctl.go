@@ -253,9 +253,12 @@ func bestToplevelCandidate(candidates []*waylandToplevel, title string) *wayland
 	// Keep fallback selection deterministic so repeated focus attempts do not hop
 	// between terminals when multiple candidates score the same.
 	var best *waylandToplevel
-	bestScore := -1
+	bestScore := 0
 	for _, candidate := range candidates {
 		score := scoreToplevelCandidate(candidate.title, title)
+		if score <= 0 {
+			continue
+		}
 		if score < bestScore {
 			continue
 		}
