@@ -58,9 +58,6 @@ func TestSessionFocuserResolvesNearestTmuxPane(t *testing.T) {
 			if name == "tmux" && len(args) >= 1 && args[0] == "list-panes" {
 				return []byte("100\tmain\teditor\t%7\t/dev/pts/20\n210\tmain\tlogs\t%8\t/dev/pts/21\n"), nil
 			}
-			if name == "tmux" && len(args) >= 1 && args[0] == "list-clients" {
-				return []byte("/dev/pts/11\n"), nil
-			}
 			return nil, nil
 		},
 		focusWindow: func(appID string, title string) error {
@@ -108,70 +105,14 @@ func TestSessionFocuserResolvesNearestTmuxPane(t *testing.T) {
 
 	want := [][]string{
 		{"tmux", "list-panes", "-a", "-F", "#{pane_pid}\t#{session_name}\t#{window_name}\t#{pane_id}\t#{pane_tty}"},
-		{"tmux", "list-clients", "-t", "main", "-F", "#{client_tty}"},
-		{"tmux", "switch-client", "-c", "/dev/pts/11", "-t", "%8"},
-		{"tmux", "refresh-client", "-t", "/dev/pts/11"},
-		{"tmux", "refresh-client", "-t", "/dev/pts/11"},
+		{"tmux", "select-window", "-t", "%8"},
+		{"tmux", "select-pane", "-t", "%8"},
 	}
 	if !reflect.DeepEqual(commands, want) {
 		t.Fatalf("commands = %#v, want %#v", commands, want)
 	}
 	if wantFocus := []string{"Alacritty", "main:logs"}; !reflect.DeepEqual(focused, wantFocus) {
 		t.Fatalf("focused = %#v, want %#v", focused, wantFocus)
-	}
-}
-
-func TestSessionFocuserReturnsErrorWithoutAttachedTmuxClient(t *testing.T) {
-	store := newOverlayModel()
-	store.Apply(socket.SessionUpdate{
-		Type: socket.SessionUpdateUpsert,
-		Session: socket.Session{
-			ID:                     "session-1",
-			LastEventAt:            time.Unix(10, 0),
-			AgentPID:               420,
-			AgentPIDNamespaceInode: 9999,
-			AgentStartTimeTicks:    1234,
-		},
-	})
-
-	focuser := &sessionFocuser{
-		store: store,
-		runCommand: func(name string, args ...string) ([]byte, error) {
-			if name == "tmux" && len(args) >= 1 && args[0] == "list-panes" {
-				return []byte("210\tmain\tlogs\t%8\t/dev/pts/21\n"), nil
-			}
-			if name == "tmux" && len(args) >= 1 && args[0] == "list-clients" {
-				return []byte(""), nil
-			}
-			return nil, nil
-		},
-		writeTTY: func(path string, data []byte) error { return nil },
-		parentPID: func(pid int) (int, error) {
-			switch pid {
-			case 420:
-				return 210, nil
-			case 210:
-				return 1, nil
-			default:
-				return 0, errors.New("unknown pid")
-			}
-		},
-		sleep:                 func(time.Duration) {},
-		readCurrentPIDNSInode: func() (uint64, error) { return 1111, nil },
-		readPIDNSInode:        func(pid int) (uint64, error) { return 9999, nil },
-		readStartTimeTicks: func(pid int) (uint64, error) {
-			if pid == 210 {
-				return 1234, nil
-			}
-			return 0, errors.New("unknown pid")
-		},
-		listProcPIDs: func() ([]int, error) { return []int{210}, nil },
-		readNSPIDs:   func(pid int) ([]int, error) { return []int{210, 420}, nil },
-	}
-
-	err := focuser.Focus("session-1")
-	if !errors.Is(err, errNoTmuxClient) {
-		t.Fatalf("Focus error = %v, want errNoTmuxClient", err)
 	}
 }
 
@@ -214,9 +155,6 @@ func TestSessionFocuserFallsBackToTTYMatch(t *testing.T) {
 			if name == "tmux" && len(args) >= 1 && args[0] == "list-panes" {
 				return []byte("210\tmain\tlogs\t%8\t/dev/pts/33\n"), nil
 			}
-			if name == "tmux" && len(args) >= 1 && args[0] == "list-clients" {
-				return []byte("/dev/pts/11\n"), nil
-			}
 			return nil, nil
 		},
 		focusWindow: func(appID string, title string) error {
@@ -239,10 +177,8 @@ func TestSessionFocuserFallsBackToTTYMatch(t *testing.T) {
 
 	want := [][]string{
 		{"tmux", "list-panes", "-a", "-F", "#{pane_pid}\t#{session_name}\t#{window_name}\t#{pane_id}\t#{pane_tty}"},
-		{"tmux", "list-clients", "-t", "main", "-F", "#{client_tty}"},
-		{"tmux", "switch-client", "-c", "/dev/pts/11", "-t", "%8"},
-		{"tmux", "refresh-client", "-t", "/dev/pts/11"},
-		{"tmux", "refresh-client", "-t", "/dev/pts/11"},
+		{"tmux", "select-window", "-t", "%8"},
+		{"tmux", "select-pane", "-t", "%8"},
 	}
 	if !reflect.DeepEqual(commands, want) {
 		t.Fatalf("commands = %#v, want %#v", commands, want)
@@ -324,9 +260,6 @@ func TestSessionFocuserRetriesFocusAfterOSCRetitle(t *testing.T) {
 		runCommand: func(name string, args ...string) ([]byte, error) {
 			if name == "tmux" && len(args) >= 1 && args[0] == "list-panes" {
 				return []byte("210\tmain\tlogs\t%8\t/dev/pts/33\n"), nil
-			}
-			if name == "tmux" && len(args) >= 1 && args[0] == "list-clients" {
-				return []byte("/dev/pts/11\n"), nil
 			}
 			return nil, nil
 		},

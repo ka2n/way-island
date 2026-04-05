@@ -16,7 +16,6 @@ var (
 	errSessionNotFound = errors.New("session not found")
 	errNoAgentPID      = errors.New("session has no agent PID")
 	errPaneNotFound    = errors.New("tmux pane not found")
-	errNoTmuxClient    = errors.New("tmux client not found")
 	errHostPIDNotFound = errors.New("host pid not found")
 )
 
@@ -89,15 +88,11 @@ func (f *sessionFocuser) Focus(sessionID string) error {
 	debugf("focus session resolved pane session_id=%s pane_id=%s pane_tty=%s session=%s window=%s pane_pid=%d",
 		sessionID, pane.PaneID, pane.PaneTTY, pane.SessionName, pane.WindowName, pane.PanePID)
 
-	clientTTY, err := f.focusTmux(pane)
-	if err != nil {
+	if err := f.focusTmux(pane); err != nil {
 		return err
 	}
 
 	if pane.WindowName == "" {
-		if err := f.refreshTmuxClient(clientTTY, pane.PaneID); err != nil {
-			return err
-		}
 		log.Printf("focus session ok session_id=%s pane_id=%s session=%s", sessionID, pane.PaneID, pane.SessionName)
 		return nil
 	}
@@ -110,23 +105,18 @@ func (f *sessionFocuser) Focus(sessionID string) error {
 	// Prefer a stable "session:window" title first so terminals configured with
 	// tmux-driven titles can be matched before falling back to looser heuristics.
 	targetTitle := preferredTerminalTitle(pane)
-	debugf("focus session terminal target session_id=%s app_id=%s title=%q", sessionID, terminalAppID, targetTitle)
+	log.Printf("focus wayland attempt session_id=%s app_id=%s title=%q", sessionID, terminalAppID, targetTitle)
 	f.sleep(50 * time.Millisecond)
 	if err := focusWindow(terminalAppID, targetTitle); err != nil {
+		log.Printf("focus wayland failed session_id=%s title=%q err=%v", sessionID, targetTitle, err)
 		if retryErr := f.retryFocusAfterRetitle(pane, targetTitle, focusWindow, err); retryErr == nil {
-			if err := f.refreshTmuxClient(clientTTY, pane.PaneID); err != nil {
-				return err
-			}
-			log.Printf("focus session ok session_id=%s pane_id=%s title=%q retry=true", sessionID, pane.PaneID, targetTitle)
+			log.Printf("focus session ok session_id=%s pane_id=%s title=%q retry=osc", sessionID, pane.PaneID, targetTitle)
 			return nil
 		}
 
 		return fmt.Errorf("focus terminal window %q: %w", pane.WindowName, err)
 	}
 
-	if err := f.refreshTmuxClient(clientTTY, pane.PaneID); err != nil {
-		return err
-	}
 	log.Printf("focus session ok session_id=%s pane_id=%s title=%q", sessionID, pane.PaneID, targetTitle)
 	return nil
 }
@@ -177,24 +167,29 @@ func (f *sessionFocuser) resolveHostAgentPID(session socket.Session) (int, error
 
 func (f *sessionFocuser) retryFocusAfterRetitle(pane tmuxPane, title string, focusWindow func(appID string, title string) error, focusErr error) error {
 	if !f.focusConfig.RetitleWithOSC {
+		log.Printf("focus osc retry skip reason=osc_disabled")
 		return focusErr
 	}
 	if strings.TrimSpace(pane.PaneTTY) == "" || strings.TrimSpace(title) == "" {
+		log.Printf("focus osc retry skip reason=empty_tty_or_title pane_tty=%q title=%q", pane.PaneTTY, title)
 		return focusErr
 	}
 	if !strings.Contains(focusErr.Error(), "wayland toplevel not found") {
+		log.Printf("focus osc retry skip reason=unexpected_error err=%v", focusErr)
 		return focusErr
 	}
-	// Only rewrite the terminal title when Wayland matching failed; this keeps
-	// the OSC path as an opt-in recovery mechanism instead of the primary path.
-	log.Printf("focus session osc retitle pane_tty=%s title=%q", pane.PaneTTY, title)
+	log.Printf("focus osc retry retitle pane_tty=%s title=%q", pane.PaneTTY, title)
 	if err := f.writeOSCWindowTitle(pane.PaneTTY, title); err != nil {
+		log.Printf("focus osc retry retitle failed err=%v", err)
 		return err
 	}
-	debugf("focus session osc retitle written pane_tty=%s title=%q", pane.PaneTTY, title)
 
 	f.sleep(50 * time.Millisecond)
-	return focusWindow(terminalAppID, title)
+	if err := focusWindow(terminalAppID, title); err != nil {
+		log.Printf("focus osc retry failed title=%q err=%v", title, err)
+		return err
+	}
+	return nil
 }
 
 func (f *sessionFocuser) writeOSCWindowTitle(ttyPath, title string) error {

@@ -117,61 +117,18 @@ func (f *sessionFocuser) resolvePaneByTTY(session socket.Session) (tmuxPane, err
 	return tmuxPane{}, fmt.Errorf("%w via tty", errPaneNotFound)
 }
 
-func (f *sessionFocuser) focusTmux(pane tmuxPane) (string, error) {
-	clients, err := f.listTmuxClients(pane.SessionName)
-	if err != nil {
-		return "", err
-	}
-	debugf("focus tmux clients session=%s clients=%v", pane.SessionName, clients)
-	if len(clients) == 0 {
-		return "", fmt.Errorf("%w for session %q", errNoTmuxClient, pane.SessionName)
-	}
-	clientTTY := clients[0]
-	if pane.PaneID != "" {
-		if _, err := f.runCommand("tmux", "switch-client", "-c", clientTTY, "-t", pane.PaneID); err != nil {
-			return "", fmt.Errorf("switch tmux client %q to pane %q: %w", clientTTY, pane.PaneID, err)
-		}
-		debugf("focus tmux switched client client=%s pane=%s", clientTTY, pane.PaneID)
-		if err := f.refreshTmuxClient(clientTTY, pane.PaneID); err != nil {
-			return "", err
-		}
-	}
-
-	return clientTTY, nil
-}
-
-func (f *sessionFocuser) refreshTmuxClient(clientTTY string, paneID string) error {
-	if strings.TrimSpace(clientTTY) == "" {
+func (f *sessionFocuser) focusTmux(pane tmuxPane) error {
+	if pane.PaneID == "" {
 		return nil
 	}
-	if _, err := f.runCommand("tmux", "refresh-client", "-t", clientTTY); err != nil {
-		return fmt.Errorf("refresh tmux client %q after switching pane %q: %w", clientTTY, paneID, err)
+	if _, err := f.runCommand("tmux", "select-window", "-t", pane.PaneID); err != nil {
+		return fmt.Errorf("select tmux window for pane %q: %w", pane.PaneID, err)
 	}
-	debugf("focus tmux refreshed client client=%s pane=%s", clientTTY, paneID)
+	if _, err := f.runCommand("tmux", "select-pane", "-t", pane.PaneID); err != nil {
+		return fmt.Errorf("select tmux pane %q: %w", pane.PaneID, err)
+	}
+	debugf("focus tmux selected pane=%s", pane.PaneID)
 	return nil
-}
-
-func (f *sessionFocuser) listTmuxClients(sessionName string) ([]string, error) {
-	if sessionName == "" {
-		return nil, fmt.Errorf("%w for empty session name", errNoTmuxClient)
-	}
-
-	output, err := f.runCommand("tmux", "list-clients", "-t", sessionName, "-F", "#{client_tty}")
-	if err != nil {
-		return nil, fmt.Errorf("list tmux clients for %q: %w", sessionName, err)
-	}
-
-	lines := strings.Split(strings.TrimSpace(string(output)), "\n")
-	clients := make([]string, 0, len(lines))
-	for _, line := range lines {
-		client := strings.TrimSpace(line)
-		if client == "" {
-			continue
-		}
-		clients = append(clients, client)
-	}
-
-	return clients, nil
 }
 
 func collectAncestorPIDs(pid int, readParent parentPIDReader) (map[int]int, error) {
