@@ -63,9 +63,21 @@ type SessionUpdate struct {
 type SessionManager struct {
 	mu       sync.Mutex
 	sessions map[string]Session
+	monitors map[string]sessionMonitorEntry
 	timeout  time.Duration
 	now      func() time.Time
 	updates  chan SessionUpdate
+}
+
+type sessionMonitorEntry struct {
+	identity processIdentity
+	monitor  sessionProcessMonitor
+}
+
+type processIdentity struct {
+	AgentPID               int
+	AgentPIDNamespaceInode uint64
+	AgentStartTimeTicks    uint64
 }
 
 type procStat struct {
@@ -160,6 +172,7 @@ func NewSessionManager(timeout time.Duration) *SessionManager {
 
 	return &SessionManager{
 		sessions: make(map[string]Session),
+		monitors: make(map[string]sessionMonitorEntry),
 		timeout:  timeout,
 		now:      time.Now,
 		updates:  make(chan SessionUpdate, 32),
@@ -238,6 +251,8 @@ func (m *SessionManager) HandleMessage(message Message) {
 		Session: session,
 		Reason:  "hook:" + message.Event,
 	})
+
+	m.ensureSessionMonitor(session)
 }
 
 func adjustSessionState(event string, state SessionState, isSubagent bool) SessionState {
@@ -267,7 +282,15 @@ func (m *SessionManager) removeSession(sessionID string, reason string) {
 	if ok {
 		delete(m.sessions, sessionID)
 	}
+	monitor, monitorOK := m.monitors[sessionID]
+	if monitorOK {
+		delete(m.monitors, sessionID)
+	}
 	m.mu.Unlock()
+
+	if monitorOK {
+		_ = monitor.monitor.Close()
+	}
 
 	if !ok {
 		return
@@ -278,6 +301,71 @@ func (m *SessionManager) removeSession(sessionID string, reason string) {
 		Session: session,
 		Reason:  reason,
 	})
+}
+
+func (m *SessionManager) ensureSessionMonitor(session Session) {
+	identity, ok := processIdentityFromSession(session)
+	if !ok {
+		m.clearSessionMonitor(session.ID)
+		return
+	}
+
+	m.mu.Lock()
+	existing, exists := m.monitors[session.ID]
+	m.mu.Unlock()
+	if exists && existing.identity == identity {
+		return
+	}
+
+	monitor, err := newSessionProcessMonitor(session, func() {
+		m.handleSessionProcessExit(session.ID, identity)
+	})
+	if err != nil {
+		debugf("session monitor unavailable session_id=%s pid=%d err=%v", session.ID, session.AgentPID, err)
+		m.clearSessionMonitor(session.ID)
+		return
+	}
+
+	m.mu.Lock()
+	replaced, hadReplaced := m.monitors[session.ID]
+	m.monitors[session.ID] = sessionMonitorEntry{
+		identity: identity,
+		monitor:  monitor,
+	}
+	m.mu.Unlock()
+
+	if hadReplaced {
+		_ = replaced.monitor.Close()
+	}
+}
+
+func (m *SessionManager) clearSessionMonitor(sessionID string) {
+	m.mu.Lock()
+	entry, ok := m.monitors[sessionID]
+	if ok {
+		delete(m.monitors, sessionID)
+	}
+	m.mu.Unlock()
+	if ok {
+		_ = entry.monitor.Close()
+	}
+}
+
+func (m *SessionManager) handleSessionProcessExit(sessionID string, identity processIdentity) {
+	m.mu.Lock()
+	session, ok := m.sessions[sessionID]
+	if !ok {
+		m.mu.Unlock()
+		return
+	}
+	currentIdentity, currentOK := processIdentityFromSession(session)
+	if !currentOK || currentIdentity != identity {
+		m.mu.Unlock()
+		return
+	}
+	m.mu.Unlock()
+
+	m.removeSession(sessionID, "pidfd:process_exit")
 }
 
 func (m *SessionManager) Start(ctx context.Context, interval time.Duration) {
@@ -499,7 +587,23 @@ func isSessionProcessAlive(session Session) bool {
 		return false
 	}
 
-	resolver := HostPIDResolver{
+	resolver := newLivenessHostPIDResolver()
+	if hostPID, ok := resolver.Resolve(session); ok {
+		return isProcessAlive(hostPID)
+	}
+
+	if session.AgentInJail || session.AgentPIDNamespaceInode > 0 && session.AgentPID < 100 {
+		return false
+	}
+
+	return isProcessAlive(session.AgentPID)
+}
+
+func newLivenessHostPIDResolver() HostPIDResolver {
+	return HostPIDResolver{
+		ReadCurrentPIDNSInode: func() (uint64, error) {
+			return readPIDNamespaceInodeForLiveness(os.Getpid())
+		},
 		ReadPIDNamespaceInode: readPIDNamespaceInodeForLiveness,
 		ReadNamespacedPIDs:    readNSPIDsForLiveness,
 		ReadStartTimeTicks: func(pid int) (uint64, error) {
@@ -511,15 +615,17 @@ func isSessionProcessAlive(session Session) bool {
 		},
 		ListPIDs: listProcPIDsForLiveness,
 	}
-	if hostPID, ok := resolver.Resolve(session); ok {
-		return isProcessAlive(hostPID)
-	}
+}
 
-	if session.AgentInJail || session.AgentPIDNamespaceInode > 0 && session.AgentPID < 100 {
-		return false
+func processIdentityFromSession(session Session) (processIdentity, bool) {
+	if session.AgentPID <= 0 {
+		return processIdentity{}, false
 	}
-
-	return isProcessAlive(session.AgentPID)
+	return processIdentity{
+		AgentPID:               session.AgentPID,
+		AgentPIDNamespaceInode: session.AgentPIDNamespaceInode,
+		AgentStartTimeTicks:    session.AgentStartTimeTicks,
+	}, true
 }
 
 func sessionStateFromEvent(event string) (SessionState, bool) {

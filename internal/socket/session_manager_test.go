@@ -6,6 +6,19 @@ import (
 	"time"
 )
 
+type fakeSessionProcessMonitor struct {
+	closeCount int
+	onClose    func()
+}
+
+func (m *fakeSessionProcessMonitor) Close() error {
+	m.closeCount++
+	if m.onClose != nil {
+		m.onClose()
+	}
+	return nil
+}
+
 func TestSessionManagerAddsSession(t *testing.T) {
 	t.Parallel()
 
@@ -251,6 +264,98 @@ func TestSessionManagerStoresAgentMetadata(t *testing.T) {
 	}
 	if !update.Session.AgentInJail {
 		t.Fatalf("AgentInJail = false, want true")
+	}
+}
+
+func TestSessionManagerRemovesSessionOnProcessExit(t *testing.T) {
+	origFactory := newSessionProcessMonitor
+	t.Cleanup(func() {
+		newSessionProcessMonitor = origFactory
+	})
+
+	exitCallbacks := map[string]func(){}
+	newSessionProcessMonitor = func(session Session, onExit func()) (sessionProcessMonitor, error) {
+		exitCallbacks[session.ID] = onExit
+		return &fakeSessionProcessMonitor{}, nil
+	}
+
+	manager := NewSessionManager(DefaultSessionTimeout)
+	manager.HandleMessage(Message{
+		SessionID: "session-1",
+		Event:     "working",
+		Data: map[string]any{
+			"_ppid":             float64(42),
+			"_agent_start_time": float64(123456),
+		},
+	})
+	_ = waitForSessionUpdate(t, manager.Updates())
+
+	onExit, ok := exitCallbacks["session-1"]
+	if !ok {
+		t.Fatal("expected process exit callback to be registered")
+	}
+	onExit()
+
+	update := waitForSessionUpdate(t, manager.Updates())
+	if update.Type != SessionUpdateTimeout {
+		t.Fatalf("unexpected update type: %q", update.Type)
+	}
+	if update.Reason != "pidfd:process_exit" {
+		t.Fatalf("unexpected removal reason: %q", update.Reason)
+	}
+	if len(manager.Sessions()) != 0 {
+		t.Fatalf("expected session to be removed, got %d sessions", len(manager.Sessions()))
+	}
+}
+
+func TestSessionManagerIgnoresStaleProcessExitAfterPIDChange(t *testing.T) {
+	origFactory := newSessionProcessMonitor
+	t.Cleanup(func() {
+		newSessionProcessMonitor = origFactory
+	})
+
+	monitors := make(map[int]*fakeSessionProcessMonitor)
+	exitCallbacks := make(map[int]func())
+	newSessionProcessMonitor = func(session Session, onExit func()) (sessionProcessMonitor, error) {
+		monitor := &fakeSessionProcessMonitor{}
+		monitors[session.AgentPID] = monitor
+		exitCallbacks[session.AgentPID] = onExit
+		return monitor, nil
+	}
+
+	manager := NewSessionManager(DefaultSessionTimeout)
+	manager.HandleMessage(Message{
+		SessionID: "session-1",
+		Event:     "working",
+		Data: map[string]any{
+			"_ppid":             float64(42),
+			"_agent_start_time": float64(1000),
+		},
+	})
+	_ = waitForSessionUpdate(t, manager.Updates())
+
+	manager.HandleMessage(Message{
+		SessionID: "session-1",
+		Event:     "working",
+		Data: map[string]any{
+			"_ppid":             float64(84),
+			"_agent_start_time": float64(2000),
+		},
+	})
+	_ = waitForSessionUpdate(t, manager.Updates())
+
+	if monitors[42].closeCount != 1 {
+		t.Fatalf("old monitor close count = %d, want 1", monitors[42].closeCount)
+	}
+
+	exitCallbacks[42]()
+
+	sessions := manager.Sessions()
+	if len(sessions) != 1 {
+		t.Fatalf("expected updated session to remain, got %d sessions", len(sessions))
+	}
+	if sessions["session-1"].AgentPID != 84 {
+		t.Fatalf("AgentPID = %d, want 84", sessions["session-1"].AgentPID)
 	}
 }
 
