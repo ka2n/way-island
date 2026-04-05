@@ -1,6 +1,7 @@
 package socket
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -119,6 +120,40 @@ func TestSessionManagerStoresLastUserMessageFromPromptSubmit(t *testing.T) {
 	update := waitForSessionUpdate(t, manager.Updates())
 	if update.Session.LastUserMessage != "show me the last user message in session detail" {
 		t.Fatalf("LastUserMessage = %q", update.Session.LastUserMessage)
+	}
+}
+
+func TestSessionManagerTruncatesLastUserMessageByRune(t *testing.T) {
+	t.Parallel()
+
+	manager := NewSessionManager(DefaultSessionTimeout)
+	manager.HandleMessage(Message{
+		SessionID: "session-1",
+		Event:     "working",
+		Data: map[string]any{
+			"hook_event_name": "UserPromptSubmit",
+			"prompt":          strings.Repeat("あ", maxLastUserMessageRunes),
+		},
+	})
+
+	update := waitForSessionUpdate(t, manager.Updates())
+	if update.Session.LastUserMessage != strings.Repeat("あ", maxLastUserMessageRunes) {
+		t.Fatalf("LastUserMessage = %q", update.Session.LastUserMessage)
+	}
+
+	manager.HandleMessage(Message{
+		SessionID: "session-1",
+		Event:     "working",
+		Data: map[string]any{
+			"hook_event_name": "UserPromptSubmit",
+			"prompt":          strings.Repeat("あ", maxLastUserMessageRunes+1),
+		},
+	})
+
+	update = waitForSessionUpdate(t, manager.Updates())
+	want := strings.Repeat("あ", maxLastUserMessageRunes-3) + "..."
+	if update.Session.LastUserMessage != want {
+		t.Fatalf("LastUserMessage = %q, want %q", update.Session.LastUserMessage, want)
 	}
 }
 

@@ -10,9 +10,11 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"unicode/utf8"
 )
 
 const DefaultSessionTimeout = 5 * time.Minute
+const maxLastUserMessageRunes = 140
 
 type SessionState string
 
@@ -445,8 +447,9 @@ func resolveLastUserMessage(existing string, data map[string]any) string {
 	}
 
 	text = strings.Join(strings.Fields(text), " ")
-	if len(text) > 140 {
-		text = text[:137] + "..."
+	if utf8.RuneCountInString(text) > maxLastUserMessageRunes {
+		runes := []rune(text)
+		text = string(runes[:maxLastUserMessageRunes-3]) + "..."
 	}
 	return text
 }
