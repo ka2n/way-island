@@ -24,7 +24,6 @@ const hoverCloseDelayMS = 160
 const widthAnimationDuration = 200 * time.Millisecond
 const listDetailAnimationDuration = 260 * time.Millisecond
 const shellClosedWidth = 200
-const shellExpandedWidth = 340
 const animationScaleEnv = "WAY_ISLAND_ANIMATION_SCALE"
 const animationDebugEnv = "WAY_ISLAND_DEBUG_ANIMATION"
 
@@ -172,15 +171,15 @@ func (ui *gtkUI) closedShellWidth() int {
 }
 
 func (ui *gtkUI) listShellWidth() int {
-	return measureShellWidth(ui.listPage, &ui.cachedListWidth, ui.closedShellWidth())
+	return clampShellExpandedWidth(measureShellWidth(ui.listPage, &ui.cachedListWidth, ui.closedShellWidth()))
 }
 
 func (ui *gtkUI) detailShellWidth() int {
-	return measureShellWidth(ui.detailPage, &ui.cachedDetailWidth, ui.listShellWidth())
+	return clampShellExpandedWidth(measureShellWidth(ui.detailPage, &ui.cachedDetailWidth, ui.listShellWidth()))
 }
 
 func (ui *gtkUI) frozenListShellWidth() int {
-	return measureShellWidth(ui.closingListPage, &ui.cachedListWidth, ui.listShellWidth())
+	return clampShellExpandedWidth(measureShellWidth(ui.closingListPage, &ui.cachedListWidth, ui.listShellWidth()))
 }
 
 func (ui *gtkUI) measuredWidthForPanelView(panelView int) int {
@@ -608,6 +607,9 @@ func (ui *gtkUI) updateShellWidth(animate bool) {
 	if !animate || currentWidth <= 0 || currentWidth == targetWidth {
 		debugAnimationLog("updateShellWidth immediate panel=%d width=%d", ui.panelView, targetWidth)
 		ui.applyShellWidth(targetWidth)
+		if ui.panelView == panelViewDetail {
+			ui.syncDetailHostHeight(false)
+		}
 		return
 	}
 
@@ -633,6 +635,9 @@ func (ui *gtkUI) updateShellWidth(animate bool) {
 			ui.widthAnimSource = 0
 			ui.applyShellWidth(ui.widthAnimTo)
 			debugAnimationLog("updateShellWidth animate_done panel=%d final=%d", ui.panelView, ui.widthAnimTo)
+			if ui.panelView == panelViewDetail {
+				ui.syncDetailHostHeight(false)
+			}
 			return false
 		}
 		return true

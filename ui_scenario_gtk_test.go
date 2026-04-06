@@ -132,3 +132,70 @@ func TestGTKScenarioBasicPanelFlow(t *testing.T) {
 		t.Skipf("skip GTK scenario test: %v", err)
 	}
 }
+
+func TestGTKScenarioDetailHeightResyncAfterWidthAnimation(t *testing.T) {
+	initialPayload := encodePayloadSessions([]payloadSession{
+		{
+			ID:     "session-1",
+			Name:   "Alpha",
+			State:  "tool_running",
+			Action: "Bash: SUPERCALIFRAGILISTICEXPIALIDOCIOUS_SUPERCALIFRAGILISTICEXPIALIDOCIOUS_SUPERCALIFRAGILISTICEXPIALIDOCIOUS",
+		},
+	})
+	updatedPayload := encodePayloadSessions([]payloadSession{
+		{
+			ID:    "session-1",
+			Name:  "Alpha",
+			State: "tool_running",
+			Action: "Bash: this action is intentionally made of many short words so the detail layout " +
+				"can wrap across multiple lines after the shell width animation settles to a narrower size",
+		},
+	})
+
+	err := withGTKTestUI(initialPayload, panelViewDetail, "session-1", func(window *gtkmini.Window, widget *gtkmini.Widget, ui *gtkUI) error {
+		initialSettlePumps, err := pumpGTKUntilStable(ui, 240)
+		if err != nil {
+			t.Fatal(err)
+		}
+		initialWidth := ui.shell.Width()
+		initialHeight := ui.detailHost.Height()
+
+		ui.sessionsPayload = updatedPayload
+		ui.rebuildUI(updatedPayload)
+		gtkmini.PumpEvents(1)
+		updatedEarlyHeight := ui.detailHost.Height()
+
+		updatedSettlePumps, err := pumpGTKUntilStable(ui, 240)
+		if err != nil {
+			t.Fatal(err)
+		}
+		updatedWidth := ui.shell.Width()
+		updatedHeight := ui.detailHost.Height()
+
+		t.Logf(
+			"detail resync widths initial=%d updated=%d heights initial=%d updated_early=%d updated=%d settle_pumps(initial=%d updated=%d)",
+			initialWidth,
+			updatedWidth,
+			initialHeight,
+			updatedEarlyHeight,
+			updatedHeight,
+			initialSettlePumps,
+			updatedSettlePumps,
+		)
+
+		if updatedWidth >= initialWidth {
+			t.Fatalf("expected updated detail width to shrink: initial=%d updated=%d", initialWidth, updatedWidth)
+		}
+		if updatedHeight <= initialHeight {
+			t.Fatalf("expected updated detail height to grow after width shrink: initial=%d updated=%d", initialHeight, updatedHeight)
+		}
+		if updatedHeight <= updatedEarlyHeight {
+			t.Fatalf("expected detail height to resync after animation: early=%d updated=%d", updatedEarlyHeight, updatedHeight)
+		}
+
+		return nil
+	})
+	if err != nil {
+		t.Skipf("skip GTK scenario test: %v", err)
+	}
+}
