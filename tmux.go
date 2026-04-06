@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
 	"strconv"
@@ -121,6 +122,11 @@ func (f *sessionFocuser) focusTmux(pane tmuxPane) error {
 	if pane.PaneID == "" {
 		return nil
 	}
+	// If no client is attached to the target session, switch an existing client
+	// from another session so the pane becomes visible.
+	if err := f.ensureTmuxClientAttached(pane.SessionName); err != nil {
+		return err
+	}
 	if _, err := f.runCommand("tmux", "select-window", "-t", pane.PaneID); err != nil {
 		return fmt.Errorf("select tmux window for pane %q: %w", pane.PaneID, err)
 	}
@@ -129,6 +135,49 @@ func (f *sessionFocuser) focusTmux(pane tmuxPane) error {
 	}
 	debugf("focus tmux selected pane=%s", pane.PaneID)
 	return nil
+}
+
+func (f *sessionFocuser) ensureTmuxClientAttached(sessionName string) error {
+	clients, err := f.listTmuxClients(sessionName)
+	if err != nil {
+		return err
+	}
+	if len(clients) > 0 {
+		return nil
+	}
+	// No client on this session — find any client and switch it over.
+	allClients, err := f.listTmuxClients("")
+	if err != nil {
+		return err
+	}
+	if len(allClients) == 0 {
+		return fmt.Errorf("no tmux clients available to switch to session %q", sessionName)
+	}
+	clientTTY := allClients[0]
+	log.Printf("focus tmux switch-client client=%s session=%s", clientTTY, sessionName)
+	if _, err := f.runCommand("tmux", "switch-client", "-c", clientTTY, "-t", sessionName); err != nil {
+		return fmt.Errorf("switch tmux client %q to session %q: %w", clientTTY, sessionName, err)
+	}
+	return nil
+}
+
+func (f *sessionFocuser) listTmuxClients(sessionName string) ([]string, error) {
+	args := []string{"list-clients", "-F", "#{client_tty}"}
+	if sessionName != "" {
+		args = []string{"list-clients", "-t", sessionName, "-F", "#{client_tty}"}
+	}
+	output, err := f.runCommand("tmux", args...)
+	if err != nil {
+		return nil, fmt.Errorf("list tmux clients: %w", err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(output)), "\n")
+	clients := make([]string, 0, len(lines))
+	for _, line := range lines {
+		if c := strings.TrimSpace(line); c != "" {
+			clients = append(clients, c)
+		}
+	}
+	return clients, nil
 }
 
 func collectAncestorPIDs(pid int, readParent parentPIDReader) (map[int]int, error) {
