@@ -44,6 +44,8 @@ func run(args []string, stdin io.Reader, stderr io.Writer) int {
 			return runInit(args[1:], stderr)
 		case "inspect":
 			return runInspect(stderr)
+		case "focus":
+			return runFocus(args[1:], stderr)
 		}
 	}
 
@@ -94,9 +96,10 @@ func runDaemon(stderr io.Writer) int {
 
 	merged := sessionManager.Updates()
 
-	// Create the store (single source of truth) and wire it to the server for inspect
+	// Create the store (single source of truth) and wire it to the server for inspect/focus
 	store := newOverlayModel()
 	server.SetInspector(store)
+	server.SetFocuser(newSessionFocuser(store))
 
 	status := runUI(ctx, merged, store)
 
@@ -126,6 +129,27 @@ func runInspect(stderr io.Writer) int {
 	}
 
 	fmt.Println(string(data))
+	return 0
+}
+
+func runFocus(args []string, stderr io.Writer) int {
+	if len(args) == 0 {
+		_, _ = fmt.Fprintf(stderr, "usage: way-island focus <session-id>\n")
+		return 1
+	}
+	sessionID := args[0]
+
+	socketPath, err := socket.DefaultPath()
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "failed to resolve socket path: %v\n", err)
+		return 1
+	}
+
+	if err := socket.FocusSession(socketPath, sessionID); err != nil {
+		_, _ = fmt.Fprintf(stderr, "focus failed: %v\n", err)
+		return 1
+	}
+
 	return 0
 }
 

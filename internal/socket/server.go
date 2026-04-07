@@ -33,6 +33,11 @@ type Inspector interface {
 	Sessions() map[string]Session
 }
 
+// Focuser provides session focus for the focus command.
+type Focuser interface {
+	Focus(sessionID string) error
+}
+
 type HandlerFunc func(Message)
 
 func (f HandlerFunc) HandleMessage(message Message) {
@@ -43,6 +48,7 @@ type Server struct {
 	path      string
 	handler   Handler
 	inspector Inspector
+	focuser   Focuser
 
 	mu       sync.Mutex
 	listener net.Listener
@@ -88,6 +94,11 @@ func NewServer(path string, handler Handler) (*Server, error) {
 // This overrides any inspector derived from the handler.
 func (s *Server) SetInspector(insp Inspector) {
 	s.inspector = insp
+}
+
+// SetFocuser sets the focuser used by the _focus command.
+func (s *Server) SetFocuser(f Focuser) {
+	s.focuser = f
 }
 
 func (s *Server) Start(ctx context.Context) error {
@@ -184,6 +195,11 @@ func (s *Server) handleConn(conn net.Conn) {
 			return
 		}
 
+		if message.Event == "_focus" && s.focuser != nil {
+			s.handleFocus(conn, message.SessionID)
+			return
+		}
+
 		debugf("handleConn: received session_id=%s event=%s", message.SessionID, message.Event)
 		s.handler.HandleMessage(message)
 	}
@@ -245,6 +261,15 @@ func (s *Server) handleInspect(conn net.Conn) {
 		"pid":      os.Getpid(),
 		"sessions": result,
 	})
+}
+
+func (s *Server) handleFocus(conn net.Conn, sessionID string) {
+	err := s.focuser.Focus(sessionID)
+	resp := map[string]any{"ok": err == nil}
+	if err != nil {
+		resp["error"] = err.Error()
+	}
+	_ = json.NewEncoder(conn).Encode(resp)
 }
 
 func (s *Server) cleanup() {
