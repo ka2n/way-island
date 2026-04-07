@@ -50,7 +50,7 @@ static void gtkmini_click_cb(GtkGestureClick *gesture, gint n_press, gdouble x, 
 	(void)n_press;
 	(void)x;
 	(void)y;
-	GdkEvent *event = gtk_gesture_get_last_event(GTK_GESTURE(gesture), gtk_gesture_get_last_updated_sequence(GTK_GESTURE(gesture)));
+	GdkEvent *event = gtk_event_controller_get_current_event(GTK_EVENT_CONTROLLER(gesture));
 	if (event != NULL) {
 		GdkModifierType state = gdk_event_get_modifier_state(event);
 		if (state & GDK_SHIFT_MASK) {
@@ -64,7 +64,7 @@ static void gtkmini_shift_click_cb(GtkGestureClick *gesture, gint n_press, gdoub
 	(void)n_press;
 	(void)x;
 	(void)y;
-	GdkEvent *event = gtk_gesture_get_last_event(GTK_GESTURE(gesture), gtk_gesture_get_last_updated_sequence(GTK_GESTURE(gesture)));
+	GdkEvent *event = gtk_event_controller_get_current_event(GTK_EVENT_CONTROLLER(gesture));
 	if (event != NULL) {
 		GdkModifierType state = gdk_event_get_modifier_state(event);
 		if (state & GDK_SHIFT_MASK) {

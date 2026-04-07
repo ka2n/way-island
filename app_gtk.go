@@ -1057,7 +1057,7 @@ func sessionGroup(state string) string {
 	switch state {
 	case "waiting":
 		return "waiting"
-	case "working":
+	case "working", "tool_running":
 		return "working"
 	default:
 		return "other"
@@ -1157,7 +1157,7 @@ func (ui *gtkUI) buildSessionRow(session payloadSession, interactive bool) *gtkm
 			ui.pinPanel()
 			ui.openDetail(session.ID)
 		})
-		row.ConnectShiftClick(func() {
+		row.ConnectLongPress(func() {
 			ui.closePanel()
 			if gtkSessionFocuser != nil {
 				triggerSessionFocus(gtkSessionFocuser, session.ID)

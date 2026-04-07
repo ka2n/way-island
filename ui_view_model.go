@@ -460,7 +460,7 @@ func countSessionsByClass(sessions []payloadSession, group string) int {
 		switch session.State {
 		case "waiting":
 			sessionGroup = "waiting"
-		case "working":
+		case "working", "tool_running":
 			sessionGroup = "working"
 		}
 		if sessionGroup == group {
