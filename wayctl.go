@@ -240,9 +240,9 @@ func (c *waylandFocusClient) findToplevel(appID string, title string) *waylandTo
 		}
 	}
 
-	// When there is only one terminal candidate, prefer focusing something
-	// plausible over failing the request outright.
-	if len(candidates) == 1 {
+	// When there is only one terminal candidate and no title was requested,
+	// prefer focusing something plausible over failing the request outright.
+	if trimmedTitle == "" && len(candidates) == 1 {
 		return candidates[0]
 	}
 
