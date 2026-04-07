@@ -16,16 +16,20 @@
           src = ./.;
           nativeBuildInputs = with pkgs; [
             pkg-config
+            makeWrapper
           ];
           buildInputs = with pkgs; [
             gtk4
             gtk4-layer-shell
+            tmux
           ];
           tags = [ "gtk4" ];
           vendorHash = "sha256-sYMfACCgaOi0M9MktRjFj2Qn+D1L1IFO2DLQLE0JAzs=";
           postInstall = ''
             install -Dm644 ${./packaging/systemd/user/way-island.service} \
               $out/share/systemd/user/way-island.service
+            wrapProgram $out/bin/way-island \
+              --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.tmux ]}
           '';
         };
       in
