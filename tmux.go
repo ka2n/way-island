@@ -180,6 +180,16 @@ func (f *sessionFocuser) listTmuxClients(sessionName string) ([]string, error) {
 	return clients, nil
 }
 
+// activePaneTTY returns the TTY of the currently active (focused) tmux pane.
+// Returns empty string if tmux is not running or the query fails.
+func activePaneTTY(runner focusRunner) (string, error) {
+	output, err := runner("tmux", "display-message", "-p", "#{pane_tty}")
+	if err != nil {
+		return "", fmt.Errorf("active pane tty: %w", err)
+	}
+	return strings.TrimSpace(string(output)), nil
+}
+
 func collectAncestorPIDs(pid int, readParent parentPIDReader) (map[int]int, error) {
 	ancestors := map[int]int{}
 	current := pid

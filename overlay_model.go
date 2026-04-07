@@ -3,7 +3,6 @@ package main
 import (
 	"encoding/base64"
 	"encoding/json"
-	"sort"
 	"strings"
 	"sync"
 	"unicode/utf8"
@@ -14,15 +13,31 @@ import (
 // overlayModel is the single source of truth for session state (Flux-style store).
 // Thread-safe: accessed from update goroutine, UI goroutine, and inspect handler.
 type overlayModel struct {
-	mu       sync.RWMutex
-	sessions map[string]socket.Session
+	mu            sync.RWMutex
+	sessions      map[string]socket.Session
+	order         []string        // stable insertion order; new sessions appended to end
+	suppressedIDs map[string]bool // sessions whose pane is currently the active tmux pane
 }
 
 const maxLastUserMessageRunes = 120
 
 func newOverlayModel() *overlayModel {
 	return &overlayModel{
-		sessions: make(map[string]socket.Session),
+		sessions:      make(map[string]socket.Session),
+		suppressedIDs: make(map[string]bool),
+	}
+}
+
+// SetSuppressed marks or unmarks a session as suppressed.
+// Suppressed sessions do not contribute to the active-session badge counts,
+// because the user's terminal is already showing that session.
+func (m *overlayModel) SetSuppressed(id string, suppressed bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if suppressed {
+		m.suppressedIDs[id] = true
+	} else {
+		delete(m.suppressedIDs, id)
 	}
 }
 
@@ -41,10 +56,21 @@ func (m *overlayModel) Apply(update socket.SessionUpdate) {
 			if update.Session.LastEventAt.Before(existing.LastEventAt) {
 				return
 			}
+		} else {
+			// New session: append to stable order
+			m.order = append(m.order, update.Session.ID)
 		}
 		m.sessions[update.Session.ID] = update.Session
 	case socket.SessionUpdateTimeout:
 		delete(m.sessions, update.Session.ID)
+		delete(m.suppressedIDs, update.Session.ID)
+		// Remove from stable order
+		for i, id := range m.order {
+			if id == update.Session.ID {
+				m.order = append(m.order[:i], m.order[i+1:]...)
+				break
+			}
+		}
 	}
 }
 
@@ -69,10 +95,13 @@ func (m *overlayModel) Session(id string) (socket.Session, bool) {
 }
 
 // Payload returns a base64-encoded TSV string for the GTK UI.
-// Sessions are sorted with waiting first, then working, then other states, then by LastEventAt descending.
-// Format:
-// base64(SessionID)\tbase64(DisplayName)\tbase64(State)\tbase64(CurrentAction)\tbase64(LastUserMessage)\tbase64(ParentSessionID)\tbase64(IsSubagent)\tbase64(AgentNickname)\tbase64(HookSource)\tbase64(Subagents)\n
-// per session.
+// Sessions are returned in stable insertion order; new sessions are appended to the end.
+// Format (11 tab-separated base64 fields per line):
+//
+//	base64(SessionID)\tbase64(DisplayName)\tbase64(State)\tbase64(CurrentAction)\t
+//	base64(LastUserMessage)\tbase64(ParentSessionID)\tbase64(IsSubagent "0"|"1")\t
+//	base64(AgentNickname)\tbase64(HookSource)\tbase64(Subagents JSON)\t
+//	base64(IsSuppressed "0"|"1")\n
 func (m *overlayModel) Payload() string {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -81,22 +110,14 @@ func (m *overlayModel) Payload() string {
 		return ""
 	}
 
+	// Use stable insertion order — no reordering while list is open.
+	// New sessions are appended to the end.
 	sessions := make([]socket.Session, 0, len(m.sessions))
-	for _, session := range m.sessions {
-		sessions = append(sessions, session)
+	for _, id := range m.order {
+		if session, ok := m.sessions[id]; ok {
+			sessions = append(sessions, session)
+		}
 	}
-
-	sort.Slice(sessions, func(i, j int) bool {
-		leftPriority := sessionSortPriority(sessions[i].State)
-		rightPriority := sessionSortPriority(sessions[j].State)
-		if leftPriority != rightPriority {
-			return leftPriority < rightPriority
-		}
-		if sessions[i].LastEventAt.Equal(sessions[j].LastEventAt) {
-			return sessions[i].ID < sessions[j].ID
-		}
-		return sessions[i].LastEventAt.After(sessions[j].LastEventAt)
-	})
 
 	var builder strings.Builder
 	for _, session := range sessions {
@@ -127,6 +148,12 @@ func (m *overlayModel) Payload() string {
 		builder.WriteString(base64.StdEncoding.EncodeToString([]byte(session.HookSource)))
 		builder.WriteByte('\t')
 		builder.WriteString(base64.StdEncoding.EncodeToString(mustMarshalSubagents(session.Subagents)))
+		builder.WriteByte('\t')
+		if m.suppressedIDs[session.ID] {
+			builder.WriteString(base64.StdEncoding.EncodeToString([]byte("1")))
+		} else {
+			builder.WriteString(base64.StdEncoding.EncodeToString([]byte("0")))
+		}
 		builder.WriteByte('\n')
 	}
 
@@ -142,17 +169,6 @@ func mustMarshalSubagents(subagents []socket.SubagentSummary) []byte {
 		return []byte("[]")
 	}
 	return data
-}
-
-func sessionSortPriority(state socket.SessionState) int {
-	switch state {
-	case socket.SessionStateWaiting:
-		return 0
-	case socket.SessionStateWorking:
-		return 1
-	default:
-		return 2
-	}
 }
 
 func truncateLastUserMessage(message string) string {

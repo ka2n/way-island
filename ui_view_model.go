@@ -68,6 +68,7 @@ type payloadSession struct {
 	AgentNickname   string
 	HookSource      string
 	Subagents       []payloadSubagent
+	IsSuppressed    bool
 }
 
 type payloadSubagent struct {
@@ -127,11 +128,13 @@ func buildPillViewModel(sessions []payloadSession) pillViewModel {
 
 	primary := sessions[0]
 	return pillViewModel{
-		Title:        displayName(primary),
-		State:        primary.State,
-		StateClass:   statusClass(primary.State),
-		Clickable:    true,
-		BadgeCount:   len(sessions),
+		Title:      displayName(primary),
+		State:      primary.State,
+		StateClass: statusClass(primary.State),
+		Clickable:  true,
+		BadgeCount: len(sessions),
+		// Suppressed sessions are already visible in the user's terminal,
+		// so they should not contribute to the "needs attention" badge counts.
 		WaitingCount: countSessionsByClass(sessions, "waiting"),
 		WorkingCount: countSessionsByClass(sessions, "working"),
 		OtherCount:   countSessionsByClass(sessions, "other"),
@@ -195,7 +198,7 @@ func parsePayloadSessions(payload string) []payloadSession {
 			continue
 		}
 
-		fields := strings.SplitN(line, "\t", 10)
+		fields := strings.SplitN(line, "\t", 11)
 		if len(fields) < 3 {
 			continue
 		}
@@ -261,6 +264,13 @@ func parsePayloadSessions(payload string) []payloadSession {
 				_ = json.Unmarshal([]byte(decodedSubagents), &subagents)
 			}
 		}
+		isSuppressed := false
+		if len(fields) >= 11 {
+			decodedSuppressed, ok := decodePayloadField(fields[10])
+			if ok {
+				isSuppressed = decodedSuppressed == "1"
+			}
+		}
 
 		sessions = append(sessions, payloadSession{
 			ID:              sessionID,
@@ -273,6 +283,7 @@ func parsePayloadSessions(payload string) []payloadSession {
 			AgentNickname:   agentNickname,
 			HookSource:      hookSource,
 			Subagents:       subagents,
+			IsSuppressed:    isSuppressed,
 		})
 	}
 
@@ -440,6 +451,11 @@ func statusLabel(state string) string {
 func countSessionsByClass(sessions []payloadSession, group string) int {
 	count := 0
 	for _, session := range sessions {
+		// Suppressed sessions are already visible in the user's active terminal pane.
+		// Don't count them as needing attention in the badge.
+		if session.IsSuppressed {
+			continue
+		}
 		sessionGroup := "other"
 		switch session.State {
 		case "waiting":

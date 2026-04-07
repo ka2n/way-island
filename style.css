@@ -113,6 +113,7 @@
   margin: 6px 16px 14px 16px;
   border-top: 1px solid rgba(110, 125, 148, 0.2);
   padding-top: 10px;
+  min-width: 280px;
 }
 
 .session-row {
@@ -121,7 +122,6 @@
 }
 
 .session-row-shell {
-  margin: 0 4px 4px 4px;
 }
 
 .session-row > * {

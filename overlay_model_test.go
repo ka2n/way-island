@@ -9,14 +9,14 @@ import (
 	"github.com/ka2n/way-island/internal/socket"
 )
 
-func TestOverlayModelPayloadSortsByLastEventAtDescending(t *testing.T) {
+func TestOverlayModelPayloadUsesInsertionOrder(t *testing.T) {
 	model := newOverlayModel()
 
 	model.Apply(socket.SessionUpdate{
 		Type: socket.SessionUpdateUpsert,
 		Session: socket.Session{
-			ID:          "session-old",
-			DisplayName: "project-old",
+			ID:          "session-first",
+			DisplayName: "project-first",
 			State:       socket.SessionStateWorking,
 			LastEventAt: time.Unix(10, 0),
 		},
@@ -24,8 +24,8 @@ func TestOverlayModelPayloadSortsByLastEventAtDescending(t *testing.T) {
 	model.Apply(socket.SessionUpdate{
 		Type: socket.SessionUpdateUpsert,
 		Session: socket.Session{
-			ID:          "session-new",
-			DisplayName: "project-new",
+			ID:          "session-second",
+			DisplayName: "project-second",
 			State:       socket.SessionStateWorking,
 			LastEventAt: time.Unix(20, 0),
 		},
@@ -38,69 +38,48 @@ func TestOverlayModelPayloadSortsByLastEventAtDescending(t *testing.T) {
 	}
 
 	first := decodePayloadFields(t, lines[0])
-	if first[0] != "session-new" || first[1] != "project-new" || first[2] != string(socket.SessionStateWorking) || first[3] != "" {
-		t.Fatalf("unexpected first payload line: %#v", first)
+	if first[0] != "session-first" {
+		t.Fatalf("expected insertion-order first session, got %#v", first)
 	}
 
 	second := decodePayloadFields(t, lines[1])
-	if second[0] != "session-old" || second[1] != "project-old" || second[2] != string(socket.SessionStateWorking) || second[3] != "" {
-		t.Fatalf("unexpected second payload line: %#v", second)
+	if second[0] != "session-second" {
+		t.Fatalf("expected insertion-order second session, got %#v", second)
 	}
 }
 
-func TestOverlayModelPayloadPrioritizesWaitingSessions(t *testing.T) {
+func TestOverlayModelPayloadNoReorderOnStateChange(t *testing.T) {
 	model := newOverlayModel()
 
+	// session-working added first
 	model.Apply(socket.SessionUpdate{
 		Type: socket.SessionUpdateUpsert,
 		Session: socket.Session{
 			ID:          "session-working",
 			DisplayName: "project-working",
 			State:       socket.SessionStateWorking,
-			LastEventAt: time.Unix(20, 0),
+			LastEventAt: time.Unix(10, 0),
 		},
 	})
+	// session-waiting added second
 	model.Apply(socket.SessionUpdate{
 		Type: socket.SessionUpdateUpsert,
 		Session: socket.Session{
 			ID:          "session-waiting",
 			DisplayName: "project-waiting",
 			State:       socket.SessionStateWaiting,
-			LastEventAt: time.Unix(10, 0),
-		},
-	})
-
-	payload := model.Payload()
-	lines := strings.Split(strings.TrimSuffix(payload, "\n"), "\n")
-	if len(lines) != 2 {
-		t.Fatalf("expected 2 sessions in payload, got %d", len(lines))
-	}
-
-	first := decodePayloadFields(t, lines[0])
-	if first[0] != "session-waiting" || first[2] != string(socket.SessionStateWaiting) {
-		t.Fatalf("expected waiting session first, got %#v", first)
-	}
-}
-
-func TestOverlayModelPayloadPrioritizesWorkingAheadOfOtherStates(t *testing.T) {
-	model := newOverlayModel()
-
-	model.Apply(socket.SessionUpdate{
-		Type: socket.SessionUpdateUpsert,
-		Session: socket.Session{
-			ID:          "session-idle",
-			DisplayName: "project-idle",
-			State:       socket.SessionStateIdle,
 			LastEventAt: time.Unix(20, 0),
 		},
 	})
+
+	// State change on working session — should NOT cause reorder
 	model.Apply(socket.SessionUpdate{
 		Type: socket.SessionUpdateUpsert,
 		Session: socket.Session{
 			ID:          "session-working",
 			DisplayName: "project-working",
-			State:       socket.SessionStateWorking,
-			LastEventAt: time.Unix(10, 0),
+			State:       socket.SessionStateWaiting,
+			LastEventAt: time.Unix(30, 0),
 		},
 	})
 
@@ -111,77 +90,52 @@ func TestOverlayModelPayloadPrioritizesWorkingAheadOfOtherStates(t *testing.T) {
 	}
 
 	first := decodePayloadFields(t, lines[0])
-	if first[0] != "session-working" || first[2] != string(socket.SessionStateWorking) {
-		t.Fatalf("expected working session before idle, got %#v", first)
+	if first[0] != "session-working" {
+		t.Fatalf("expected insertion-order preserved after state change, got %#v", first)
 	}
 }
 
-func TestOverlayModelPayloadSortsWaitingSessionsByLastEventAtDescending(t *testing.T) {
+func TestOverlayModelPayloadNewSessionAppendsToEnd(t *testing.T) {
 	model := newOverlayModel()
 
-	model.Apply(socket.SessionUpdate{
-		Type: socket.SessionUpdateUpsert,
-		Session: socket.Session{
-			ID:          "session-waiting-old",
-			DisplayName: "project-waiting-old",
-			State:       socket.SessionStateWaiting,
-			LastEventAt: time.Unix(10, 0),
-		},
-	})
-	model.Apply(socket.SessionUpdate{
-		Type: socket.SessionUpdateUpsert,
-		Session: socket.Session{
-			ID:          "session-waiting-new",
-			DisplayName: "project-waiting-new",
-			State:       socket.SessionStateWaiting,
-			LastEventAt: time.Unix(20, 0),
-		},
-	})
-
-	payload := model.Payload()
-	lines := strings.Split(strings.TrimSuffix(payload, "\n"), "\n")
-	if len(lines) != 2 {
-		t.Fatalf("expected 2 sessions in payload, got %d", len(lines))
-	}
-
-	first := decodePayloadFields(t, lines[0])
-	if first[0] != "session-waiting-new" || first[2] != string(socket.SessionStateWaiting) {
-		t.Fatalf("expected newer waiting session first, got %#v", first)
-	}
-}
-
-func TestOverlayModelPayloadTiebreaksByID(t *testing.T) {
-	model := newOverlayModel()
-
-	sameTime := time.Unix(10, 0)
-	model.Apply(socket.SessionUpdate{
-		Type: socket.SessionUpdateUpsert,
-		Session: socket.Session{
-			ID:          "session-b",
-			DisplayName: "project-b",
-			State:       socket.SessionStateWorking,
-			LastEventAt: sameTime,
-		},
-	})
 	model.Apply(socket.SessionUpdate{
 		Type: socket.SessionUpdateUpsert,
 		Session: socket.Session{
 			ID:          "session-a",
 			DisplayName: "project-a",
+			State:       socket.SessionStateWaiting,
+			LastEventAt: time.Unix(10, 0),
+		},
+	})
+	model.Apply(socket.SessionUpdate{
+		Type: socket.SessionUpdateUpsert,
+		Session: socket.Session{
+			ID:          "session-b",
+			DisplayName: "project-b",
+			State:       socket.SessionStateWaiting,
+			LastEventAt: time.Unix(20, 0),
+		},
+	})
+	// New session added after existing ones — should appear last
+	model.Apply(socket.SessionUpdate{
+		Type: socket.SessionUpdateUpsert,
+		Session: socket.Session{
+			ID:          "session-c",
+			DisplayName: "project-c",
 			State:       socket.SessionStateWorking,
-			LastEventAt: sameTime,
+			LastEventAt: time.Unix(5, 0),
 		},
 	})
 
 	payload := model.Payload()
 	lines := strings.Split(strings.TrimSuffix(payload, "\n"), "\n")
-	if len(lines) != 2 {
-		t.Fatalf("expected 2 sessions, got %d", len(lines))
+	if len(lines) != 3 {
+		t.Fatalf("expected 3 sessions in payload, got %d", len(lines))
 	}
 
-	first := decodePayloadFields(t, lines[0])
-	if first[0] != "session-a" || first[1] != "project-a" {
-		t.Fatalf("expected session-a first (ID tiebreak), got %#v", first)
+	last := decodePayloadFields(t, lines[2])
+	if last[0] != "session-c" {
+		t.Fatalf("expected new session appended to end, got %#v", last)
 	}
 }
 
@@ -337,6 +291,93 @@ func TestOverlayModelPayloadTruncatesLastUserMessageByRune(t *testing.T) {
 	want := strings.Repeat("あ", maxLastUserMessageRunes) + "..."
 	if got != want {
 		t.Fatalf("expected truncated last user message %q, got %q", want, got)
+	}
+}
+
+func TestOverlayModelPayloadIncludesSuppressedFlag(t *testing.T) {
+	model := newOverlayModel()
+
+	model.Apply(socket.SessionUpdate{
+		Type: socket.SessionUpdateUpsert,
+		Session: socket.Session{
+			ID:          "session-1",
+			DisplayName: "project",
+			State:       socket.SessionStateWorking,
+			AgentTTY:    "/dev/pts/5",
+			LastEventAt: time.Unix(10, 0),
+		},
+	})
+
+	// Not suppressed initially
+	fields := decodePayloadFields(t, strings.TrimSuffix(model.Payload(), "\n"))
+	if len(fields) < 11 {
+		t.Fatalf("expected 11 fields, got %d", len(fields))
+	}
+	if fields[10] != "0" {
+		t.Fatalf("IsSuppressed = %q, want %q", fields[10], "0")
+	}
+
+	// Mark as suppressed
+	model.SetSuppressed("session-1", true)
+	fields = decodePayloadFields(t, strings.TrimSuffix(model.Payload(), "\n"))
+	if fields[10] != "1" {
+		t.Fatalf("IsSuppressed = %q, want %q after SetSuppressed(true)", fields[10], "1")
+	}
+
+	// Unmark
+	model.SetSuppressed("session-1", false)
+	fields = decodePayloadFields(t, strings.TrimSuffix(model.Payload(), "\n"))
+	if fields[10] != "0" {
+		t.Fatalf("IsSuppressed = %q, want %q after SetSuppressed(false)", fields[10], "0")
+	}
+}
+
+func TestCountSessionsByClassSkipsSuppressed(t *testing.T) {
+	t.Parallel()
+
+	sessions := []payloadSession{
+		{ID: "s1", State: "waiting", IsSuppressed: false},
+		{ID: "s2", State: "waiting", IsSuppressed: true},  // suppressed → skip
+		{ID: "s3", State: "working", IsSuppressed: false},
+		{ID: "s4", State: "working", IsSuppressed: true},  // suppressed → skip
+	}
+
+	waitingCount := countSessionsByClass(sessions, "waiting")
+	if waitingCount != 1 {
+		t.Fatalf("waitingCount = %d, want 1 (suppressed session excluded)", waitingCount)
+	}
+	workingCount := countSessionsByClass(sessions, "working")
+	if workingCount != 1 {
+		t.Fatalf("workingCount = %d, want 1 (suppressed session excluded)", workingCount)
+	}
+}
+
+func TestActivePaneTTYSmartSuppress(t *testing.T) {
+	t.Parallel()
+
+	model := newOverlayModel()
+	model.Apply(socket.SessionUpdate{
+		Type: socket.SessionUpdateUpsert,
+		Session: socket.Session{
+			ID:          "session-1",
+			State:       socket.SessionStateWaiting,
+			AgentTTY:    "/dev/pts/42",
+			LastEventAt: time.Unix(10, 0),
+		},
+	})
+
+	// Simulate active pane matching
+	model.SetSuppressed("session-1", true)
+
+	// Build pill: WaitingCount should be 0 (suppressed)
+	sessions := parsePayloadSessions(model.Payload())
+	pill := buildPillViewModel(sessions)
+	if pill.WaitingCount != 0 {
+		t.Fatalf("WaitingCount = %d, want 0 (session is suppressed)", pill.WaitingCount)
+	}
+	// BadgeCount still includes it
+	if pill.BadgeCount != 1 {
+		t.Fatalf("BadgeCount = %d, want 1", pill.BadgeCount)
 	}
 }
 
