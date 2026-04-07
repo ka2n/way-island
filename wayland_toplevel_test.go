@@ -49,7 +49,7 @@ func TestWaylandFocusClientFindToplevelByContainedWindowName(t *testing.T) {
 	}
 }
 
-func TestWaylandFocusClientFindToplevelFallsBackToSingleCandidate(t *testing.T) {
+func TestWaylandFocusClientFindToplevelReturnsNilForTitleMismatch(t *testing.T) {
 	client := &waylandFocusClient{
 		toplevels: map[uint32]*waylandToplevel{
 			8: {id: 8, appID: "Alacritty", title: "random-title", initialized: true},
@@ -57,15 +57,12 @@ func TestWaylandFocusClientFindToplevelFallsBackToSingleCandidate(t *testing.T) 
 	}
 
 	match := client.findToplevel("Alacritty", "logs")
-	if match == nil {
-		t.Fatal("findToplevel returned nil")
-	}
-	if match.id != 8 {
-		t.Fatalf("match.id = %d, want %d", match.id, 8)
+	if match != nil {
+		t.Fatalf("findToplevel returned %v, want nil", match)
 	}
 }
 
-func TestWaylandFocusClientFindToplevelFallsBackDeterministicallyForMultipleCandidates(t *testing.T) {
+func TestWaylandFocusClientFindToplevelReturnsNilWhenNoTitleMatch(t *testing.T) {
 	client := &waylandFocusClient{
 		toplevels: map[uint32]*waylandToplevel{
 			8: {id: 8, appID: "Alacritty", title: "beta", initialized: true},
@@ -74,10 +71,7 @@ func TestWaylandFocusClientFindToplevelFallsBackDeterministicallyForMultipleCand
 	}
 
 	match := client.findToplevel("Alacritty", "missing")
-	if match == nil {
-		t.Fatal("findToplevel returned nil")
-	}
-	if match.id != 9 {
-		t.Fatalf("match.id = %d, want %d", match.id, 9)
+	if match != nil {
+		t.Fatalf("findToplevel returned %v, want nil", match)
 	}
 }
