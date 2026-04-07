@@ -551,19 +551,6 @@ func (ui *gtkUI) syncDetailHostHeight(animate bool) {
 	}
 	ui.detailHost.QueueResize()
 
-	if ui.panelView == panelViewDetail {
-		targetHeight := ui.measureCurrentPanelHeight()
-		if targetHeight > 0 {
-			fromHeight := ui.detailHost.Height()
-			if fromHeight <= 0 {
-				fromHeight = currentHeight
-			}
-			debugAnimationLog("syncDetailHostHeight immediate detail from=%d to=%d", fromHeight, targetHeight)
-			ui.animateDetailHeight(fromHeight, targetHeight, false, animate)
-			return
-		}
-	}
-
 	ui.scheduleDetailHostHeightSync(currentHeight, animate, 0)
 }
 
