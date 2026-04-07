@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"os"
 	"path/filepath"
@@ -89,7 +90,7 @@ func TestRunHookFallsBackToCodexEnvironmentSession(t *testing.T) {
 }
 
 func TestResolveHookSourceAutoDetectsCodex(t *testing.T) {
-	source := resolveHookSource(false, false, map[string]any{
+	source := resolveHookSource(false, false, false, false, map[string]any{
 		"hook_event_name": "PreToolUse",
 		"tool_name":       "Bash",
 	})
@@ -287,4 +288,110 @@ func TestRunHookCanForceCodexParser(t *testing.T) {
 	}
 
 	shutdownHookTestServer(t, server)
+}
+
+func TestNormalizeEventNameCursor(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		input string
+		want  string
+	}{
+		{"beforeSubmitPrompt", "UserPromptSubmit"},
+		{"beforeShellExecution", "PreToolUse"},
+		{"afterShellExecution", "PostToolUse"},
+		{"beforeReadFile", "PreToolUse"},
+		{"afterFileEdit", "PostToolUse"},
+		{"beforeMCPExecution", "PreToolUse"},
+		{"afterMCPExecution", "PostToolUse"},
+		{"afterAgentThought", "Notification"},
+		{"afterAgentResponse", "Stop"},
+		{"stop", "Stop"},
+		{"UnknownCursorEvent", "UnknownCursorEvent"},
+	}
+
+	for _, tt := range tests {
+		got := normalizeEventName(hookSourceCursor, tt.input)
+		if got != tt.want {
+			t.Errorf("normalizeEventName(cursor, %q) = %q, want %q", tt.input, got, tt.want)
+		}
+	}
+}
+
+func TestNormalizeEventNameGemini(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		input string
+		want  string
+	}{
+		{"BeforeTool", "PreToolUse"},
+		{"AfterTool", "PostToolUse"},
+		{"BeforeAgent", "SubagentStart"},
+		{"AfterAgent", "SubagentStop"},
+		{"UnknownGeminiEvent", "UnknownGeminiEvent"},
+	}
+
+	for _, tt := range tests {
+		got := normalizeEventName(hookSourceGemini, tt.input)
+		if got != tt.want {
+			t.Errorf("normalizeEventName(gemini, %q) = %q, want %q", tt.input, got, tt.want)
+		}
+	}
+}
+
+func TestNormalizeEventNamePassthroughForClaude(t *testing.T) {
+	t.Parallel()
+
+	got := normalizeEventName(hookSourceClaude, "PreToolUse")
+	if got != "PreToolUse" {
+		t.Errorf("normalizeEventName(claude, PreToolUse) = %q, want PreToolUse", got)
+	}
+}
+
+func TestRunHookRejectsMultipleSourceFlags(t *testing.T) {
+	var stderr bytes.Buffer
+	exitCode := run([]string{"hook", "--cursor", "--gemini"}, bytes.NewBufferString(`{}`), &stderr)
+	if exitCode != 2 {
+		t.Fatalf("expected exit code 2, got %d", exitCode)
+	}
+}
+
+func TestRunHookNewEvents(t *testing.T) {
+	tests := []struct {
+		hookEvent string
+		wantEvent string
+	}{
+		{"PermissionDenied", "permission_denied"},
+		{"PostToolUseFailure", "tool_end_failure"},
+		{"SubagentStart", "subagent_start"},
+		{"SubagentStop", "subagent_stop"},
+		{"PreCompact", "compacting"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.hookEvent, func(t *testing.T) {
+			runtimeDir := t.TempDir()
+			socketPath := filepath.Join(runtimeDir, "way-island.sock")
+			received := make(chan socket.Message, 1)
+
+			startHookTestServer(t, socketPath, socket.HandlerFunc(func(message socket.Message) {
+				received <- message
+			}))
+
+			t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
+
+			payload := fmt.Sprintf(`{"session_id":"session-1","hook_event_name":"%s"}`, tt.hookEvent)
+			var stderr bytes.Buffer
+			exitCode := run([]string{"hook"}, bytes.NewBufferString(payload), &stderr)
+			if exitCode != 0 {
+				t.Fatalf("expected exit code 0, got %d: %s", exitCode, stderr.String())
+			}
+
+			message := <-received
+			if message.Event != tt.wantEvent {
+				t.Fatalf("event = %q, want %q", message.Event, tt.wantEvent)
+			}
+		})
+	}
 }

@@ -639,6 +639,219 @@ func TestSessionManagerKeepsNamespacedSessionAlive(t *testing.T) {
 	}
 }
 
+func TestSessionManagerSetsCurrentToolFailedOnToolEndFailure(t *testing.T) {
+	t.Parallel()
+
+	manager := NewSessionManager(DefaultSessionTimeout)
+	manager.HandleMessage(Message{
+		SessionID: "session-1",
+		Event:     "tool_start",
+		Data: map[string]any{
+			"tool_name": "Bash",
+			"command":   "make build",
+		},
+	})
+	_ = waitForSessionUpdate(t, manager.Updates())
+
+	manager.HandleMessage(Message{
+		SessionID: "session-1",
+		Event:     "tool_end_failure",
+		Data:      map[string]any{},
+	})
+
+	update := waitForSessionUpdate(t, manager.Updates())
+	if update.Session.State != SessionStateWorking {
+		t.Fatalf("State = %q, want %q", update.Session.State, SessionStateWorking)
+	}
+	if !update.Session.CurrentToolFailed {
+		t.Fatalf("CurrentToolFailed = false, want true")
+	}
+	if update.Session.CurrentAction != "" {
+		t.Fatalf("CurrentAction = %q, want empty", update.Session.CurrentAction)
+	}
+}
+
+func TestSessionManagerClearsCurrentToolFailedOnNewToolStart(t *testing.T) {
+	t.Parallel()
+
+	manager := NewSessionManager(DefaultSessionTimeout)
+	manager.HandleMessage(Message{
+		SessionID: "session-1",
+		Event:     "tool_end_failure",
+		Data:      map[string]any{},
+	})
+	_ = waitForSessionUpdate(t, manager.Updates())
+
+	manager.HandleMessage(Message{
+		SessionID: "session-1",
+		Event:     "tool_start",
+		Data: map[string]any{
+			"tool_name": "Read",
+		},
+	})
+
+	update := waitForSessionUpdate(t, manager.Updates())
+	if update.Session.CurrentToolFailed {
+		t.Fatalf("CurrentToolFailed = true, want false after tool_start")
+	}
+}
+
+func TestSessionManagerPermissionDeniedTransitionsToWorking(t *testing.T) {
+	t.Parallel()
+
+	manager := NewSessionManager(DefaultSessionTimeout)
+	manager.HandleMessage(Message{
+		SessionID: "session-1",
+		Event:     "tool_start",
+		Data: map[string]any{
+			"tool_name": "Bash",
+		},
+	})
+	_ = waitForSessionUpdate(t, manager.Updates())
+
+	manager.HandleMessage(Message{
+		SessionID: "session-1",
+		Event:     "permission_denied",
+		Data:      map[string]any{},
+	})
+
+	update := waitForSessionUpdate(t, manager.Updates())
+	if update.Session.State != SessionStateWorking {
+		t.Fatalf("State = %q, want %q", update.Session.State, SessionStateWorking)
+	}
+	if update.Session.CurrentAction != "" {
+		t.Fatalf("CurrentAction = %q, want empty", update.Session.CurrentAction)
+	}
+}
+
+func TestSessionManagerCompactingSetsAction(t *testing.T) {
+	t.Parallel()
+
+	manager := NewSessionManager(DefaultSessionTimeout)
+	manager.HandleMessage(Message{
+		SessionID: "session-1",
+		Event:     "compacting",
+		Data:      map[string]any{},
+	})
+
+	update := waitForSessionUpdate(t, manager.Updates())
+	if update.Session.State != SessionStateWorking {
+		t.Fatalf("State = %q, want %q", update.Session.State, SessionStateWorking)
+	}
+	if update.Session.CurrentAction != "Compacting context…" {
+		t.Fatalf("CurrentAction = %q, want %q", update.Session.CurrentAction, "Compacting context…")
+	}
+}
+
+func TestSessionManagerSubagentStartStop(t *testing.T) {
+	t.Parallel()
+
+	manager := NewSessionManager(DefaultSessionTimeout)
+	manager.HandleMessage(Message{
+		SessionID: "session-1",
+		Event:     "subagent_start",
+		Data:      map[string]any{},
+	})
+
+	update := waitForSessionUpdate(t, manager.Updates())
+	if update.Session.State != SessionStateWorking {
+		t.Fatalf("State = %q, want %q", update.Session.State, SessionStateWorking)
+	}
+
+	manager.HandleMessage(Message{
+		SessionID: "session-1",
+		Event:     "subagent_stop",
+		Data:      map[string]any{},
+	})
+
+	update = waitForSessionUpdate(t, manager.Updates())
+	if update.Session.State != SessionStateWorking {
+		t.Fatalf("State = %q, want %q", update.Session.State, SessionStateWorking)
+	}
+}
+
+func TestResolveToolDetailExtractsFilePath(t *testing.T) {
+	t.Parallel()
+
+	data := map[string]any{
+		"tool_input": map[string]any{
+			"file_path": "/home/user/project/src/main.go",
+		},
+	}
+	detail := resolveToolDetail(data)
+	if detail != "main.go" {
+		t.Fatalf("resolveToolDetail = %q, want %q", detail, "main.go")
+	}
+}
+
+func TestResolveToolDetailExtractsPattern(t *testing.T) {
+	t.Parallel()
+
+	data := map[string]any{
+		"tool_input": map[string]any{
+			"pattern": "func.*Handler",
+		},
+	}
+	detail := resolveToolDetail(data)
+	if detail != "func.*Handler" {
+		t.Fatalf("resolveToolDetail = %q, want %q", detail, "func.*Handler")
+	}
+}
+
+func TestResolveToolDetailTruncatesPrompt(t *testing.T) {
+	t.Parallel()
+
+	longPrompt := strings.Repeat("a", 50)
+	data := map[string]any{
+		"tool_input": map[string]any{
+			"prompt": longPrompt,
+		},
+	}
+	detail := resolveToolDetail(data)
+	if len([]rune(detail)) != 40 {
+		t.Fatalf("resolveToolDetail length = %d, want 40", len([]rune(detail)))
+	}
+}
+
+func TestResolveToolDetailUsedInCurrentAction(t *testing.T) {
+	t.Parallel()
+
+	manager := NewSessionManager(DefaultSessionTimeout)
+	manager.HandleMessage(Message{
+		SessionID: "session-1",
+		Event:     "tool_start",
+		Data: map[string]any{
+			"tool_name": "Read",
+			"tool_input": map[string]any{
+				"file_path": "/home/user/project/src/main.go",
+			},
+		},
+	})
+
+	update := waitForSessionUpdate(t, manager.Updates())
+	if update.Session.CurrentAction != "Read: main.go" {
+		t.Fatalf("CurrentAction = %q, want %q", update.Session.CurrentAction, "Read: main.go")
+	}
+}
+
+func TestSessionManagerStoresTermProgram(t *testing.T) {
+	t.Parallel()
+
+	manager := NewSessionManager(DefaultSessionTimeout)
+	manager.HandleMessage(Message{
+		SessionID: "session-1",
+		Event:     "working",
+		Data: map[string]any{
+			"_term_program": "WezTerm",
+		},
+	})
+
+	update := waitForSessionUpdate(t, manager.Updates())
+	if update.Session.TermProgram != "WezTerm" {
+		t.Fatalf("TermProgram = %q, want %q", update.Session.TermProgram, "WezTerm")
+	}
+}
+
 func waitForSessionUpdate(t *testing.T, updates <-chan SessionUpdate) SessionUpdate {
 	t.Helper()
 

@@ -214,6 +214,7 @@ func (s *Server) handleInspect(conn net.Conn) {
 		State                  string            `json:"state"`
 		CurrentTool            string            `json:"current_tool,omitempty"`
 		CurrentAction          string            `json:"current_action,omitempty"`
+		CurrentToolFailed      bool              `json:"current_tool_failed,omitempty"`
 		LastUserMessage        string            `json:"last_user_message,omitempty"`
 		ParentSessionID        string            `json:"parent_session_id,omitempty"`
 		IsSubagent             bool              `json:"is_subagent,omitempty"`
@@ -229,6 +230,7 @@ func (s *Server) handleInspect(conn net.Conn) {
 		AgentTTYNr             int64             `json:"agent_tty_nr,omitempty"`
 		HookTTY                string            `json:"hook_tty,omitempty"`
 		AgentInJail            bool              `json:"agent_in_jail,omitempty"`
+		TermProgram            string            `json:"term_program,omitempty"`
 	}
 
 	result := make([]sessionJSON, 0, len(sessions))
@@ -239,6 +241,7 @@ func (s *Server) handleInspect(conn net.Conn) {
 			State:                  string(s.State),
 			CurrentTool:            s.CurrentTool,
 			CurrentAction:          s.CurrentAction,
+			CurrentToolFailed:      s.CurrentToolFailed,
 			LastUserMessage:        s.LastUserMessage,
 			ParentSessionID:        s.ParentSessionID,
 			IsSubagent:             s.IsSubagent,
@@ -254,6 +257,7 @@ func (s *Server) handleInspect(conn net.Conn) {
 			AgentTTYNr:             s.AgentTTYNr,
 			HookTTY:                s.HookTTY,
 			AgentInJail:            s.AgentInJail,
+			TermProgram:            s.TermProgram,
 		})
 	}
 

@@ -31,6 +31,7 @@ type Session struct {
 	State                  SessionState
 	CurrentTool            string
 	CurrentAction          string
+	CurrentToolFailed      bool
 	LastUserMessage        string
 	ParentSessionID        string
 	IsSubagent             bool
@@ -45,6 +46,7 @@ type Session struct {
 	AgentTTYNr             int64
 	HookTTY                string
 	AgentInJail            bool
+	TermProgram            string
 }
 
 type SessionUpdateType string
@@ -207,6 +209,7 @@ func (m *SessionManager) HandleMessage(message Message) {
 		State:                  state,
 		CurrentTool:            resolveCurrentTool(existing.CurrentTool, message.Event, message.Data),
 		CurrentAction:          resolveCurrentAction(existing.CurrentAction, message.Event, message.Data),
+		CurrentToolFailed:      resolveCurrentToolFailed(existing.CurrentToolFailed, message.Event),
 		LastUserMessage:        resolveLastUserMessage(existing.LastUserMessage, message.Data),
 		ParentSessionID:        parentSessionID,
 		IsSubagent:             isSubagent,
@@ -221,6 +224,7 @@ func (m *SessionManager) HandleMessage(message Message) {
 		AgentTTYNr:             resolveInt64(existing.AgentTTYNr, message.Data, "_agent_tty_nr"),
 		HookTTY:                resolveString(existing.HookTTY, message.Data, "_hook_tty"),
 		AgentInJail:            resolveBool(existing.AgentInJail, message.Data, "_jai_jail"),
+		TermProgram:            resolveString(existing.TermProgram, message.Data, "_term_program"),
 	}
 	if hookSource == "codex" && shouldEnrichCodexSessionMetadata(existing, session) {
 		if metadata, ok := readCodexSessionMetadataFunc(message.SessionID); ok {
@@ -492,9 +496,12 @@ func resolveCurrentAction(existing string, event string, data map[string]any) st
 		// approval". Track upstream: openai/codex#15311, #16301, #16484.
 		toolName := strings.TrimSpace(resolveString("", data, "tool_name", "tool"))
 		command := strings.TrimSpace(resolveString("", data, "command"))
+		detail := resolveToolDetail(data)
 		switch {
 		case toolName != "" && command != "":
 			return toolName + ": " + command
+		case toolName != "" && detail != "":
+			return toolName + ": " + detail
 		case toolName != "":
 			return toolName
 		case command != "":
@@ -502,18 +509,59 @@ func resolveCurrentAction(existing string, event string, data map[string]any) st
 		default:
 			return existing
 		}
-	case "tool_end", string(SessionStateWorking), string(SessionStateWaiting), string(SessionStateIdle), "session_start", "response":
+	case "compacting":
+		return "Compacting context…"
+	case "tool_end", "tool_end_failure", "permission_denied",
+		string(SessionStateWorking), string(SessionStateWaiting), string(SessionStateIdle),
+		"session_start", "response", "subagent_start", "subagent_stop":
 		return ""
 	default:
 		return existing
 	}
 }
 
+func resolveCurrentToolFailed(existing bool, event string) bool {
+	switch event {
+	case "tool_end_failure":
+		return true
+	case "tool_start", "tool_end", "permission_denied",
+		string(SessionStateWorking), string(SessionStateWaiting), string(SessionStateIdle), "session_start":
+		return false
+	default:
+		return existing
+	}
+}
+
+// resolveToolDetail extracts a human-readable detail string from tool_input.
+// It checks file_path (basename only), pattern, and prompt (truncated to 40 chars).
+func resolveToolDetail(data map[string]any) string {
+	if filePath := firstNestedString(data, "tool_input", "file_path"); filePath != "" {
+		base := filepath.Base(filePath)
+		if base != "" && base != "." {
+			return base
+		}
+	}
+	if pattern := firstNestedString(data, "tool_input", "pattern"); pattern != "" {
+		return pattern
+	}
+	if prompt := firstNestedString(data, "tool_input", "prompt"); prompt != "" {
+		const maxPromptLen = 40
+		runes := []rune(prompt)
+		if len(runes) > maxPromptLen {
+			return string(runes[:maxPromptLen-1]) + "…"
+		}
+		return prompt
+	}
+	return ""
+}
+
 func resolveCurrentTool(existing string, event string, data map[string]any) string {
 	switch event {
 	case "tool_start", string(SessionStateToolRunning):
 		return normalizeToolName(resolveString(existing, data, "tool", "tool_name"))
-	case "tool_end", string(SessionStateWorking), string(SessionStateWaiting), string(SessionStateIdle), "session_start", "response":
+	case "tool_end", "tool_end_failure", "permission_denied", "compacting",
+		string(SessionStateWorking), string(SessionStateWaiting), string(SessionStateIdle),
+		"session_start", "response", "subagent_start", "subagent_stop":
 		return ""
 	default:
 		return existing
@@ -643,6 +691,16 @@ func sessionStateFromEvent(event string) (SessionState, bool) {
 	case "tool_start":
 		return SessionStateToolRunning, true
 	case "tool_end":
+		return SessionStateWorking, true
+	case "tool_end_failure":
+		return SessionStateWorking, true
+	case "permission_denied":
+		return SessionStateWorking, true
+	case "subagent_start":
+		return SessionStateWorking, true
+	case "subagent_stop":
+		return SessionStateWorking, true
+	case "compacting":
 		return SessionStateWorking, true
 	case "response":
 		return SessionStateWaiting, true

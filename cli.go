@@ -22,17 +22,63 @@ const (
 	hookSourceAuto   hookSource = "auto"
 	hookSourceClaude hookSource = "claude"
 	hookSourceCodex  hookSource = "codex"
+	hookSourceCursor hookSource = "cursor"
+	hookSourceGemini hookSource = "gemini"
 )
 
 // hookEventMapping maps Claude Code / Codex hook event names to internal event names.
 var hookEventMapping = map[string]string{
-	"PreToolUse":       "tool_start",
-	"PostToolUse":      "tool_end",
-	"Notification":     "waiting",
-	"Stop":             "idle",
-	"SessionStart":     "session_start",
-	"SessionEnd":       "session_end",
-	"UserPromptSubmit": "working",
+	"PreToolUse":         "tool_start",
+	"PostToolUse":        "tool_end",
+	"PostToolUseFailure": "tool_end_failure",
+	"PermissionDenied":   "permission_denied",
+	"Notification":       "waiting",
+	"Stop":               "idle",
+	"SessionStart":       "session_start",
+	"SessionEnd":         "session_end",
+	"UserPromptSubmit":   "working",
+	"SubagentStart":      "subagent_start",
+	"SubagentStop":       "subagent_stop",
+	"PreCompact":         "compacting",
+}
+
+// cursorEventMapping normalizes Cursor-specific hook event names to Claude Code equivalents.
+var cursorEventMapping = map[string]string{
+	"beforeSubmitPrompt":   "UserPromptSubmit",
+	"beforeShellExecution": "PreToolUse",
+	"afterShellExecution":  "PostToolUse",
+	"beforeReadFile":       "PreToolUse",
+	"afterFileEdit":        "PostToolUse",
+	"beforeMCPExecution":   "PreToolUse",
+	"afterMCPExecution":    "PostToolUse",
+	"afterAgentThought":    "Notification",
+	"afterAgentResponse":   "Stop",
+	"stop":                 "Stop",
+}
+
+// geminiEventMapping normalizes Gemini CLI hook event names to Claude Code equivalents.
+var geminiEventMapping = map[string]string{
+	"BeforeTool":  "PreToolUse",
+	"AfterTool":   "PostToolUse",
+	"BeforeAgent": "SubagentStart",
+	"AfterAgent":  "SubagentStop",
+}
+
+// normalizeEventName maps tool-specific event names to canonical Claude Code event names.
+func normalizeEventName(source hookSource, name string) string {
+	var mapping map[string]string
+	switch source {
+	case hookSourceCursor:
+		mapping = cursorEventMapping
+	case hookSourceGemini:
+		mapping = geminiEventMapping
+	default:
+		return name
+	}
+	if normalized, ok := mapping[name]; ok {
+		return normalized
+	}
+	return name
 }
 
 func run(args []string, stdin io.Reader, stderr io.Writer) int {
@@ -160,12 +206,20 @@ func runHook(args []string, stdin io.Reader, stderr io.Writer) int {
 	sessionID := fs.String("session", "", "Session identifier")
 	claude := fs.Bool("claude", false, "Parse the hook payload as Claude Code")
 	codex := fs.Bool("codex", false, "Parse the hook payload as Codex")
+	cursor := fs.Bool("cursor", false, "Parse the hook payload as Cursor")
+	gemini := fs.Bool("gemini", false, "Parse the hook payload as Gemini CLI")
 
 	if err := fs.Parse(args); err != nil {
-		_, _ = fmt.Fprintf(stderr, "usage: way-island hook [--session <id>] [--claude|--codex]\n")
+		_, _ = fmt.Fprintf(stderr, "usage: way-island hook [--session <id>] [--claude|--codex|--cursor|--gemini]\n")
 		return 2
 	}
-	if *claude && *codex {
+	sourceFlags := 0
+	for _, f := range []bool{*claude, *codex, *cursor, *gemini} {
+		if f {
+			sourceFlags++
+		}
+	}
+	if sourceFlags > 1 {
 		_, _ = fmt.Fprintf(stderr, "hook source flags are mutually exclusive\n")
 		return 2
 	}
@@ -176,7 +230,7 @@ func runHook(args []string, stdin io.Reader, stderr io.Writer) int {
 		return 2
 	}
 
-	source := resolveHookSource(*claude, *codex, payload)
+	source := resolveHookSource(*claude, *codex, *cursor, *gemini, payload)
 	payload, hookEventName, err := parseHookPayload(source, payload)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "%v\n", err)
@@ -185,6 +239,7 @@ func runHook(args []string, stdin io.Reader, stderr io.Writer) int {
 
 	debugJSON("hook payload", payload)
 
+	hookEventName = normalizeEventName(source, hookEventName)
 	event, ok := hookEventMapping[hookEventName]
 	debugf("hook_event_name=%q -> event=%q mapped=%v", hookEventName, event, ok)
 	if !ok {
@@ -247,6 +302,9 @@ func attachAgentMetadata(payload map[string]any) {
 	if jaiJail := os.Getenv("JAI_JAIL"); strings.TrimSpace(jaiJail) != "" {
 		payload["_jai_jail"] = true
 	}
+	if termProgram := os.Getenv("TERM_PROGRAM"); strings.TrimSpace(termProgram) != "" {
+		payload["_term_program"] = termProgram
+	}
 }
 
 func loadHookPayload(stdin io.Reader) (map[string]any, error) {
@@ -283,12 +341,16 @@ func isInteractiveReader(r io.Reader) bool {
 	return info.Mode()&os.ModeCharDevice != 0
 }
 
-func resolveHookSource(forceClaude, forceCodex bool, payload map[string]any) hookSource {
+func resolveHookSource(forceClaude, forceCodex, forceCursor, forceGemini bool, payload map[string]any) hookSource {
 	switch {
 	case forceClaude:
 		return hookSourceClaude
 	case forceCodex:
 		return hookSourceCodex
+	case forceCursor:
+		return hookSourceCursor
+	case forceGemini:
+		return hookSourceGemini
 	case looksLikeCodexPayload(payload):
 		return hookSourceCodex
 	default:
@@ -311,7 +373,10 @@ func looksLikeCodexPayload(payload map[string]any) bool {
 
 func parseHookPayload(source hookSource, payload map[string]any) (map[string]any, string, error) {
 	switch source {
-	case hookSourceClaude:
+	case hookSourceClaude, hookSourceCursor, hookSourceGemini:
+		// Cursor and Gemini event names are normalized by normalizeEventName before
+		// reaching here, so they share the same hook_event_name field structure as
+		// Claude Code hooks.
 		return parseClaudeHookPayload(payload)
 	case hookSourceCodex:
 		return parseCodexHookPayload(payload)
