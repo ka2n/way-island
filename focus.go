@@ -22,6 +22,15 @@ var (
 type focusRunner func(name string, args ...string) ([]byte, error)
 type sleepFunc func(time.Duration)
 
+// TerminalFocuser handles focusing a terminal window for a given session.
+type TerminalFocuser interface {
+	// CanHandle reports whether this focuser can handle the given session.
+	CanHandle(session socket.Session) bool
+	// Focus brings the terminal window for the session into focus.
+	// hostPID is the resolved host-namespace PID of the agent process (0 if unresolved).
+	Focus(session socket.Session, hostPID int) error
+}
+
 type sessionFocuser struct {
 	store                 *overlayModel
 	runCommand            focusRunner
@@ -34,6 +43,7 @@ type sessionFocuser struct {
 	listProcPIDs          func() ([]int, error)
 	readNSPIDs            func(int) ([]int, error)
 	focusConfig           focusConfig
+	focusers              []TerminalFocuser
 }
 
 func newSessionFocuser(store *overlayModel) *sessionFocuser {
@@ -42,7 +52,7 @@ func newSessionFocuser(store *overlayModel) *sessionFocuser {
 		log.Printf("load app config: %v", err)
 	}
 
-	return &sessionFocuser{
+	f := &sessionFocuser{
 		store:                 store,
 		runCommand:            runFocusCommand,
 		focusWindow:           focusTerminalWindow,
@@ -60,6 +70,23 @@ func newSessionFocuser(store *overlayModel) *sessionFocuser {
 		listProcPIDs: listProcPIDs,
 		readNSPIDs:   readNSPIDsForPID,
 		focusConfig:  cfg.Focus,
+	}
+	f.focusers = []TerminalFocuser{
+		&tmuxWaylandFocuser{sf: f},
+		&genericTTYFocuser{focusWindow: f.focusWindow, sleep: f.sleep},
+	}
+	return f
+}
+
+// getFocusers returns the focuser chain, lazily building the default chain if unset.
+// This allows tests to create sessionFocuser directly without calling newSessionFocuser.
+func (f *sessionFocuser) getFocusers() []TerminalFocuser {
+	if len(f.focusers) > 0 {
+		return f.focusers
+	}
+	return []TerminalFocuser{
+		&tmuxWaylandFocuser{sf: f},
+		&genericTTYFocuser{focusWindow: f.focusWindow, sleep: f.sleep},
 	}
 }
 
@@ -79,23 +106,50 @@ func (f *sessionFocuser) Focus(sessionID string) error {
 	}
 	debugf("focus session resolve host pid session_id=%s agent_pid=%d host_pid=%d err=%v", sessionID, session.AgentPID, hostPID, err)
 
-	pane, err := f.resolvePaneForSession(session, hostPID)
+	for _, focuser := range f.getFocusers() {
+		if !focuser.CanHandle(session) {
+			continue
+		}
+		if err := focuser.Focus(session, hostPID); err == nil {
+			return nil
+		} else if !errors.Is(err, errPaneNotFound) {
+			return err
+		} else {
+			debugf("focus session %s: %T: pane not found; trying next focuser", sessionID, focuser)
+		}
+	}
+	return fmt.Errorf("%w for session %s", errPaneNotFound, sessionID)
+}
+
+// tmuxWaylandFocuser handles focus via tmux pane selection followed by
+// Wayland xdg-foreign-toplevel activation.
+type tmuxWaylandFocuser struct {
+	sf *sessionFocuser
+}
+
+func (t *tmuxWaylandFocuser) CanHandle(_ socket.Session) bool {
+	return true // always attempt; returns errPaneNotFound if tmux unavailable
+}
+
+func (t *tmuxWaylandFocuser) Focus(session socket.Session, hostPID int) error {
+	sf := t.sf
+	pane, err := sf.resolvePaneForSession(session, hostPID)
 	if err != nil {
 		return err
 	}
 	debugf("focus session resolved pane session_id=%s pane_id=%s pane_tty=%s session=%s window=%s pane_pid=%d",
-		sessionID, pane.PaneID, pane.PaneTTY, pane.SessionName, pane.WindowName, pane.PanePID)
+		session.ID, pane.PaneID, pane.PaneTTY, pane.SessionName, pane.WindowName, pane.PanePID)
 
-	if _, err := f.focusTmux(pane); err != nil {
+	if _, err := sf.focusTmux(pane); err != nil {
 		return err
 	}
 
 	if pane.WindowName == "" {
-		log.Printf("focus session ok session_id=%s pane_id=%s session=%s", sessionID, pane.PaneID, pane.SessionName)
+		log.Printf("focus session ok session_id=%s pane_id=%s session=%s", session.ID, pane.PaneID, pane.SessionName)
 		return nil
 	}
 
-	focusWindow := f.focusWindow
+	focusWindow := sf.focusWindow
 	if focusWindow == nil {
 		focusWindow = focusTerminalWindow
 	}
@@ -103,22 +157,51 @@ func (f *sessionFocuser) Focus(sessionID string) error {
 	// Prefer a stable "session:window" title first so terminals configured with
 	// tmux-driven titles can be matched before falling back to looser heuristics.
 	targetTitle := preferredTerminalTitle(pane)
-	log.Printf("focus wayland attempt session_id=%s app_id=%s title=%q", sessionID, terminalAppID, targetTitle)
-	f.sleep(50 * time.Millisecond)
+	log.Printf("focus wayland attempt session_id=%s app_id=%s title=%q", session.ID, terminalAppID, targetTitle)
+	sf.sleep(50 * time.Millisecond)
 	if err := focusWindow(terminalAppID, targetTitle); err != nil {
-		log.Printf("focus wayland failed session_id=%s title=%q err=%v", sessionID, targetTitle, err)
+		log.Printf("focus wayland failed session_id=%s title=%q err=%v", session.ID, targetTitle, err)
 		if !strings.Contains(err.Error(), "wayland toplevel not found") {
 			return fmt.Errorf("focus terminal window %q: %w", pane.WindowName, err)
 		}
-		if retryErr := f.retryFocusWithTmuxTitles(pane.SessionName, targetTitle, focusWindow); retryErr == nil {
-			log.Printf("focus session ok session_id=%s pane_id=%s title=%q retry=set-titles", sessionID, pane.PaneID, targetTitle)
+		if retryErr := sf.retryFocusWithTmuxTitles(pane.SessionName, targetTitle, focusWindow); retryErr == nil {
+			log.Printf("focus session ok session_id=%s pane_id=%s title=%q retry=set-titles", session.ID, pane.PaneID, targetTitle)
 			return nil
 		}
-
 		return fmt.Errorf("focus terminal window %q: %w", pane.WindowName, err)
 	}
 
-	log.Printf("focus session ok session_id=%s pane_id=%s title=%q", sessionID, pane.PaneID, targetTitle)
+	log.Printf("focus session ok session_id=%s pane_id=%s title=%q", session.ID, pane.PaneID, targetTitle)
+	return nil
+}
+
+// genericTTYFocuser focuses a terminal window using only the AgentTTY field.
+// Used as fallback when tmux is not available or pane resolution fails.
+type genericTTYFocuser struct {
+	focusWindow func(appID string, title string) error
+	sleep       sleepFunc
+}
+
+func (g *genericTTYFocuser) CanHandle(session socket.Session) bool {
+	return strings.TrimSpace(session.AgentTTY) != ""
+}
+
+func (g *genericTTYFocuser) Focus(session socket.Session, _ int) error {
+	focusWindow := g.focusWindow
+	if focusWindow == nil {
+		focusWindow = focusTerminalWindow
+	}
+	// Use the TTY basename as a title hint; some terminals (e.g. WezTerm, kitty)
+	// include the TTY path or its basename in the window title.
+	ttyHint := ttyBaseName(session.AgentTTY)
+	log.Printf("focus generic-tty attempt session_id=%s app_id=%s tty=%s hint=%q", session.ID, terminalAppID, session.AgentTTY, ttyHint)
+	if g.sleep != nil {
+		g.sleep(50 * time.Millisecond)
+	}
+	if err := focusWindow(terminalAppID, ttyHint); err != nil {
+		return fmt.Errorf("%w: tty=%s: %v", errPaneNotFound, session.AgentTTY, err)
+	}
+	log.Printf("focus session ok session_id=%s method=generic-tty tty=%s", session.ID, session.AgentTTY)
 	return nil
 }
 

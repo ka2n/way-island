@@ -443,3 +443,84 @@ func TestSanitizeOSCTitleStripsControlBytes(t *testing.T) {
 		t.Fatalf("sanitizeOSCTitle = %q", got)
 	}
 }
+
+func TestGenericTTYFocuserCanHandle(t *testing.T) {
+	t.Parallel()
+
+	f := &genericTTYFocuser{}
+	session := socket.Session{AgentTTY: "/dev/pts/5"}
+	if !f.CanHandle(session) {
+		t.Fatal("CanHandle = false, want true for session with AgentTTY")
+	}
+
+	empty := socket.Session{}
+	if f.CanHandle(empty) {
+		t.Fatal("CanHandle = true, want false for session without AgentTTY")
+	}
+}
+
+func TestGenericTTYFocuserFocusesByTTYBasename(t *testing.T) {
+	t.Parallel()
+
+	var focused []string
+	f := &genericTTYFocuser{
+		focusWindow: func(appID string, title string) error {
+			focused = []string{appID, title}
+			return nil
+		},
+		sleep: func(time.Duration) {},
+	}
+
+	session := socket.Session{ID: "s1", AgentTTY: "/dev/pts/7"}
+	if err := f.Focus(session, 0); err != nil {
+		t.Fatalf("Focus: %v", err)
+	}
+	if want := []string{"Alacritty", "7"}; !reflect.DeepEqual(focused, want) {
+		t.Fatalf("focused = %#v, want %#v", focused, want)
+	}
+}
+
+func TestSessionFocuserFallsBackToGenericTTY(t *testing.T) {
+	// When tmux pane resolution fails (errPaneNotFound), the focuser chain
+	// should fall back to genericTTYFocuser.
+	store := newOverlayModel()
+	store.Apply(socket.SessionUpdate{
+		Type: socket.SessionUpdateUpsert,
+		Session: socket.Session{
+			ID:          "session-1",
+			LastEventAt: time.Unix(10, 0),
+			AgentPID:    2,
+			AgentTTY:    "/dev/pts/42",
+		},
+	})
+
+	var focused []string
+	focuser := &sessionFocuser{
+		store: store,
+		runCommand: func(name string, args ...string) ([]byte, error) {
+			// tmux list-panes returns nothing — pane resolution fails
+			if name == "tmux" && len(args) >= 1 && args[0] == "list-panes" {
+				return []byte(""), nil
+			}
+			return nil, nil
+		},
+		focusWindow: func(appID string, title string) error {
+			focused = []string{appID, title}
+			return nil
+		},
+		parentPID:             func(pid int) (int, error) { return 0, errors.New("not found") },
+		sleep:                 func(time.Duration) {},
+		readCurrentPIDNSInode: func() (uint64, error) { return 1111, nil },
+		readPIDNSInode:        func(pid int) (uint64, error) { return 1111, nil },
+		readStartTimeTicks:    func(pid int) (uint64, error) { return 0, errors.New("not found") },
+		listProcPIDs:          func() ([]int, error) { return nil, nil },
+		readNSPIDs:            func(pid int) ([]int, error) { return nil, errors.New("not found") },
+	}
+
+	if err := focuser.Focus("session-1"); err != nil {
+		t.Fatalf("Focus: %v", err)
+	}
+	if want := []string{"Alacritty", "42"}; !reflect.DeepEqual(focused, want) {
+		t.Fatalf("focused = %#v, want %#v", focused, want)
+	}
+}
