@@ -187,14 +187,14 @@ func TestLoadAppConfigReturnsZeroWhenMissing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load app config: %v", err)
 	}
-	if got.Focus.RetitleWithOSC {
+	if got.Focus.TmuxSetTitles {
 		t.Fatalf("unexpected config: %#v", got)
 	}
 }
 
 func TestLoadAppConfigReadsFocusSettings(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
-	if err := os.WriteFile(path, []byte("{\"focus\":{\"retitle_with_osc\":true}}"), 0o644); err != nil {
+	if err := os.WriteFile(path, []byte("{\"focus\":{\"tmux_set_titles\":true}}"), 0o644); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
 
@@ -202,7 +202,7 @@ func TestLoadAppConfigReadsFocusSettings(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load app config: %v", err)
 	}
-	if !got.Focus.RetitleWithOSC {
-		t.Fatalf("expected retitle_with_osc to be enabled: %#v", got)
+	if !got.Focus.TmuxSetTitles {
+		t.Fatalf("expected tmux_set_titles to be enabled: %#v", got)
 	}
 }

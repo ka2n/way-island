@@ -17,7 +17,7 @@ type appConfig struct {
 }
 
 type focusConfig struct {
-	RetitleWithOSC bool `json:"retitle_with_osc"`
+	TmuxSetTitles bool `json:"tmux_set_titles"`
 }
 
 func loadAppCSS(defaultCSS string) (string, error) {

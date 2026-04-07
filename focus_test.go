@@ -67,7 +67,7 @@ func TestSessionFocuserResolvesNearestTmuxPane(t *testing.T) {
 			focused = []string{appID, title}
 			return nil
 		},
-		writeTTY: func(path string, data []byte) error { return nil },
+
 		parentPID: func(pid int) (int, error) {
 			switch pid {
 			case 9210:
@@ -168,7 +168,6 @@ func TestSessionFocuserFallsBackToTTYMatch(t *testing.T) {
 			focused = []string{appID, title}
 			return nil
 		},
-		writeTTY:              func(path string, data []byte) error { return nil },
 		parentPID:             func(pid int) (int, error) { return 0, errors.New("not found") },
 		sleep:                 func(time.Duration) {},
 		readCurrentPIDNSInode: func() (uint64, error) { return 1111, nil },
@@ -231,7 +230,6 @@ func TestSessionFocuserSwitchesClientWhenNoClientAttached(t *testing.T) {
 			focused = []string{appID, title}
 			return nil
 		},
-		writeTTY:              func(path string, data []byte) error { return nil },
 		parentPID:             func(pid int) (int, error) { return 0, errors.New("not found") },
 		sleep:                 func(time.Duration) {},
 		readCurrentPIDNSInode: func() (uint64, error) { return 1111, nil },
@@ -288,7 +286,6 @@ func TestSessionFocuserCapturesTmuxPaneText(t *testing.T) {
 			return nil, nil
 		},
 		parentPID:             func(pid int) (int, error) { return 0, errors.New("not found") },
-		writeTTY:              func(path string, data []byte) error { return nil },
 		sleep:                 func(time.Duration) {},
 		readCurrentPIDNSInode: func() (uint64, error) { return 1111, nil },
 		readPIDNSInode:        func(pid int) (uint64, error) { return 1111, errors.New("not found") },
@@ -314,7 +311,7 @@ func TestSessionFocuserCapturesTmuxPaneText(t *testing.T) {
 	}
 }
 
-func TestSessionFocuserRetriesFocusAfterOSCRetitle(t *testing.T) {
+func TestSessionFocuserRetriesWithTmuxSetTitles(t *testing.T) {
 	store := newOverlayModel()
 	store.Apply(socket.SessionUpdate{
 		Type: socket.SessionUpdateUpsert,
@@ -327,31 +324,69 @@ func TestSessionFocuserRetriesFocusAfterOSCRetitle(t *testing.T) {
 	})
 
 	var focusCalls [][]string
-	var writes [][]byte
+	var commands [][]string
+	// Two clients: /dev/pts/11 (panel, on "main") and /dev/pts/22 (terminal, on "other").
+	// The panel client satisfies ensureTmuxClientAttached but isn't visible to Wayland.
+	// The retry must switch /dev/pts/22 from "other" to "main" for Wayland to find it.
+	clientSessions := map[string]string{
+		"/dev/pts/11": "main",
+		"/dev/pts/22": "other",
+	}
 	focuser := &sessionFocuser{
 		store: store,
 		runCommand: func(name string, args ...string) ([]byte, error) {
+			call := append([]string{name}, args...)
+			commands = append(commands, call)
 			if name == "tmux" && len(args) >= 1 && args[0] == "list-panes" {
 				return []byte("210\tmain\tlogs\t%8\t/dev/pts/33\n"), nil
 			}
 			if name == "tmux" && len(args) >= 1 && args[0] == "list-clients" {
-				return []byte("/dev/pts/11\n"), nil
+				if len(args) >= 3 && args[2] == "main" {
+					return []byte("/dev/pts/11\n"), nil // panel client
+				}
+				return []byte("/dev/pts/11\n/dev/pts/22\n"), nil // all clients
+			}
+			if name == "tmux" && len(args) >= 2 && args[0] == "show-options" && args[1] == "-gv" {
+				switch args[2] {
+				case "set-titles":
+					return []byte("off\n"), nil
+				case "set-titles-string":
+					return []byte("#W:#T\n"), nil
+				}
+			}
+			if name == "tmux" && len(args) >= 2 && args[0] == "display-message" {
+				// -t <client> -F #{session_name}
+				for i, a := range args {
+					if a == "-t" && i+1 < len(args) {
+						if s, ok := clientSessions[args[i+1]]; ok {
+							return []byte(s + "\n"), nil
+						}
+					}
+				}
+			}
+			if name == "tmux" && len(args) >= 1 && args[0] == "switch-client" {
+				var tty, target string
+				for i, a := range args {
+					if a == "-c" && i+1 < len(args) {
+						tty = args[i+1]
+					}
+					if a == "-t" && i+1 < len(args) {
+						target = args[i+1]
+					}
+				}
+				if tty != "" {
+					clientSessions[tty] = target
+				}
 			}
 			return nil, nil
 		},
 		focusWindow: func(appID string, title string) error {
 			focusCalls = append(focusCalls, []string{appID, title})
-			if len(focusCalls) == 1 {
-				return errors.New(`wayland toplevel not found for app_id="Alacritty" title="main:logs"`)
+			// Succeed only when /dev/pts/22 has been switched to "main".
+			if clientSessions["/dev/pts/22"] == "main" {
+				return nil
 			}
-			return nil
-		},
-		writeTTY: func(path string, data []byte) error {
-			if path != "/dev/pts/33" {
-				t.Fatalf("path = %q, want %q", path, "/dev/pts/33")
-			}
-			writes = append(writes, append([]byte(nil), data...))
-			return nil
+			return errors.New(`wayland toplevel not found for app_id="Alacritty" title="main:logs"`)
 		},
 		parentPID:             func(pid int) (int, error) { return 0, errors.New("not found") },
 		sleep:                 func(time.Duration) {},
@@ -360,20 +395,45 @@ func TestSessionFocuserRetriesFocusAfterOSCRetitle(t *testing.T) {
 		readStartTimeTicks:    func(pid int) (uint64, error) { return 0, errors.New("not found") },
 		listProcPIDs:          func() ([]int, error) { return nil, nil },
 		readNSPIDs:            func(pid int) ([]int, error) { return nil, errors.New("not found") },
-		focusConfig:           focusConfig{RetitleWithOSC: true},
+		focusConfig:           focusConfig{TmuxSetTitles: true},
 	}
 
 	if err := focuser.Focus("session-1"); err != nil {
 		t.Fatalf("Focus: %v", err)
 	}
-	if len(focusCalls) != 2 {
-		t.Fatalf("focusCalls = %#v, want two attempts", focusCalls)
+
+	// Verify the retry switched /dev/pts/22 to "main" and restored it to "other".
+	var switchCmds [][]string
+	for _, cmd := range commands {
+		if len(cmd) >= 2 && cmd[0] == "tmux" && cmd[1] == "switch-client" {
+			switchCmds = append(switchCmds, cmd)
+		}
 	}
-	if len(writes) != 1 {
-		t.Fatalf("writes = %d, want 1", len(writes))
+	wantSwitch := [][]string{
+		// retry: switch /dev/pts/22 from "other" to "main"
+		{"tmux", "switch-client", "-c", "/dev/pts/22", "-t", "main"},
+		// restore: switch /dev/pts/22 back to "other" — NOT present because focus succeeded
 	}
-	if got := string(writes[0]); got != "\033]0;main:logs\007\033]2;main:logs\007" {
-		t.Fatalf("osc payload = %q", got)
+	if !reflect.DeepEqual(switchCmds, wantSwitch) {
+		t.Fatalf("switch-client commands = %#v, want %#v", switchCmds, wantSwitch)
+	}
+
+	// Verify set-titles was enabled then restored.
+	var setOptCmds [][]string
+	for _, cmd := range commands {
+		if len(cmd) >= 3 && cmd[0] == "tmux" && cmd[1] == "set-option" {
+			setOptCmds = append(setOptCmds, cmd)
+		}
+	}
+	wantOpt := [][]string{
+		{"tmux", "set-option", "-g", "set-titles", "off"},
+		{"tmux", "set-option", "-g", "set-titles-string", "#S:#W"},
+		{"tmux", "set-option", "-g", "set-titles", "on"},
+		{"tmux", "set-option", "-g", "set-titles", "off"},
+		{"tmux", "set-option", "-g", "set-titles-string", "#W:#T"},
+	}
+	if !reflect.DeepEqual(setOptCmds, wantOpt) {
+		t.Fatalf("set-option commands = %#v, want %#v", setOptCmds, wantOpt)
 	}
 }
 

@@ -3,7 +3,6 @@ package main
 import (
 	"fmt"
 	"log"
-	"os"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -118,47 +117,48 @@ func (f *sessionFocuser) resolvePaneByTTY(session socket.Session) (tmuxPane, err
 	return tmuxPane{}, fmt.Errorf("%w via tty", errPaneNotFound)
 }
 
-func (f *sessionFocuser) focusTmux(pane tmuxPane) error {
+func (f *sessionFocuser) focusTmux(pane tmuxPane) (string, error) {
 	if pane.PaneID == "" {
-		return nil
+		return "", nil
 	}
 	// If no client is attached to the target session, switch an existing client
 	// from another session so the pane becomes visible.
-	if err := f.ensureTmuxClientAttached(pane.SessionName); err != nil {
-		return err
+	clientTTY, err := f.ensureTmuxClientAttached(pane.SessionName)
+	if err != nil {
+		return "", err
 	}
 	if _, err := f.runCommand("tmux", "select-window", "-t", pane.PaneID); err != nil {
-		return fmt.Errorf("select tmux window for pane %q: %w", pane.PaneID, err)
+		return "", fmt.Errorf("select tmux window for pane %q: %w", pane.PaneID, err)
 	}
 	if _, err := f.runCommand("tmux", "select-pane", "-t", pane.PaneID); err != nil {
-		return fmt.Errorf("select tmux pane %q: %w", pane.PaneID, err)
+		return "", fmt.Errorf("select tmux pane %q: %w", pane.PaneID, err)
 	}
-	debugf("focus tmux selected pane=%s", pane.PaneID)
-	return nil
+	debugf("focus tmux selected pane=%s client=%s", pane.PaneID, clientTTY)
+	return clientTTY, nil
 }
 
-func (f *sessionFocuser) ensureTmuxClientAttached(sessionName string) error {
+func (f *sessionFocuser) ensureTmuxClientAttached(sessionName string) (string, error) {
 	clients, err := f.listTmuxClients(sessionName)
 	if err != nil {
-		return err
+		return "", err
 	}
 	if len(clients) > 0 {
-		return nil
+		return clients[0], nil
 	}
 	// No client on this session — find any client and switch it over.
 	allClients, err := f.listTmuxClients("")
 	if err != nil {
-		return err
+		return "", err
 	}
 	if len(allClients) == 0 {
-		return fmt.Errorf("no tmux clients available to switch to session %q", sessionName)
+		return "", fmt.Errorf("no tmux clients available to switch to session %q", sessionName)
 	}
 	clientTTY := allClients[0]
 	log.Printf("focus tmux switch-client client=%s session=%s", clientTTY, sessionName)
 	if _, err := f.runCommand("tmux", "switch-client", "-c", clientTTY, "-t", sessionName); err != nil {
-		return fmt.Errorf("switch tmux client %q to session %q: %w", clientTTY, sessionName, err)
+		return "", fmt.Errorf("switch tmux client %q to session %q: %w", clientTTY, sessionName, err)
 	}
-	return nil
+	return clientTTY, nil
 }
 
 func (f *sessionFocuser) listTmuxClients(sessionName string) ([]string, error) {
@@ -224,6 +224,3 @@ func runFocusCommand(name string, args ...string) ([]byte, error) {
 	return output, fmt.Errorf("%w: %s", err, trimmed)
 }
 
-func writeTTYBytes(path string, data []byte) error {
-	return os.WriteFile(path, data, 0)
-}

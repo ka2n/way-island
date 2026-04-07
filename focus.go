@@ -26,7 +26,6 @@ type sessionFocuser struct {
 	store                 *overlayModel
 	runCommand            focusRunner
 	focusWindow           func(appID string, title string) error
-	writeTTY              func(path string, data []byte) error
 	parentPID             parentPIDReader
 	sleep                 sleepFunc
 	readCurrentPIDNSInode func() (uint64, error)
@@ -47,7 +46,6 @@ func newSessionFocuser(store *overlayModel) *sessionFocuser {
 		store:                 store,
 		runCommand:            runFocusCommand,
 		focusWindow:           focusTerminalWindow,
-		writeTTY:              writeTTYBytes,
 		parentPID:             readParentPID,
 		sleep:                 time.Sleep,
 		readCurrentPIDNSInode: readCurrentPIDNamespaceInode,
@@ -88,7 +86,7 @@ func (f *sessionFocuser) Focus(sessionID string) error {
 	debugf("focus session resolved pane session_id=%s pane_id=%s pane_tty=%s session=%s window=%s pane_pid=%d",
 		sessionID, pane.PaneID, pane.PaneTTY, pane.SessionName, pane.WindowName, pane.PanePID)
 
-	if err := f.focusTmux(pane); err != nil {
+	if _, err := f.focusTmux(pane); err != nil {
 		return err
 	}
 
@@ -109,8 +107,11 @@ func (f *sessionFocuser) Focus(sessionID string) error {
 	f.sleep(50 * time.Millisecond)
 	if err := focusWindow(terminalAppID, targetTitle); err != nil {
 		log.Printf("focus wayland failed session_id=%s title=%q err=%v", sessionID, targetTitle, err)
-		if retryErr := f.retryFocusAfterRetitle(pane, targetTitle, focusWindow, err); retryErr == nil {
-			log.Printf("focus session ok session_id=%s pane_id=%s title=%q retry=osc", sessionID, pane.PaneID, targetTitle)
+		if !strings.Contains(err.Error(), "wayland toplevel not found") {
+			return fmt.Errorf("focus terminal window %q: %w", pane.WindowName, err)
+		}
+		if retryErr := f.retryFocusWithTmuxTitles(pane.SessionName, targetTitle, focusWindow); retryErr == nil {
+			log.Printf("focus session ok session_id=%s pane_id=%s title=%q retry=set-titles", sessionID, pane.PaneID, targetTitle)
 			return nil
 		}
 
@@ -165,45 +166,121 @@ func (f *sessionFocuser) resolveHostAgentPID(session socket.Session) (int, error
 	return 0, fmt.Errorf("%w: session=%s pid=%d", errHostPIDNotFound, session.ID, session.AgentPID)
 }
 
-func (f *sessionFocuser) retryFocusAfterRetitle(pane tmuxPane, title string, focusWindow func(appID string, title string) error, focusErr error) error {
-	if !f.focusConfig.RetitleWithOSC {
-		log.Printf("focus osc retry skip reason=osc_disabled")
-		return focusErr
+// retryFocusWithTmuxTitles temporarily enables tmux set-titles so that tmux
+// sends an OSC title sequence to the terminal, then retries the Wayland focus.
+// The original set-titles and set-titles-string values are always restored.
+// retryFocusWithTmuxTitles temporarily enables tmux set-titles and tries
+// switching each client to the target session until a Wayland toplevel with
+// the expected title appears.  Original set-titles values and each client's
+// original session are always restored.
+func (f *sessionFocuser) retryFocusWithTmuxTitles(sessionName string, title string, focusWindow func(appID string, title string) error) error {
+	if !f.focusConfig.TmuxSetTitles {
+		log.Printf("focus set-titles retry skip reason=disabled")
+		return errors.New("tmux_set_titles not enabled")
 	}
-	if strings.TrimSpace(pane.PaneTTY) == "" || strings.TrimSpace(title) == "" {
-		log.Printf("focus osc retry skip reason=empty_tty_or_title pane_tty=%q title=%q", pane.PaneTTY, title)
-		return focusErr
+
+	origTitles, err := f.getTmuxGlobalOption("set-titles")
+	if err != nil {
+		log.Printf("focus set-titles retry skip reason=get_set-titles err=%v", err)
+		return err
 	}
-	if !strings.Contains(focusErr.Error(), "wayland toplevel not found") {
-		log.Printf("focus osc retry skip reason=unexpected_error err=%v", focusErr)
-		return focusErr
+	origTitleString, err := f.getTmuxGlobalOption("set-titles-string")
+	if err != nil {
+		log.Printf("focus set-titles retry skip reason=get_set-titles-string err=%v", err)
+		return err
 	}
-	log.Printf("focus osc retry retitle pane_tty=%s title=%q", pane.PaneTTY, title)
-	if err := f.writeOSCWindowTitle(pane.PaneTTY, title); err != nil {
-		log.Printf("focus osc retry retitle failed err=%v", err)
+	log.Printf("focus set-titles retry title=%q orig_set-titles=%q orig_set-titles-string=%q", title, origTitles, origTitleString)
+
+	// Cycle set-titles off→on with the desired format to force tmux to
+	// re-push the title to all terminals, even when the settings haven't
+	// changed from their current values.
+	titleStringFormat := "#S:#W"
+	f.runCommand("tmux", "set-option", "-g", "set-titles", "off")
+	if _, err := f.runCommand("tmux", "set-option", "-g", "set-titles-string", titleStringFormat); err != nil {
+		f.restoreTmuxTitles(origTitles, origTitleString)
+		return fmt.Errorf("set tmux set-titles-string: %w", err)
+	}
+	if _, err := f.runCommand("tmux", "set-option", "-g", "set-titles", "on"); err != nil {
+		f.restoreTmuxTitles(origTitles, origTitleString)
+		return fmt.Errorf("set tmux set-titles on: %w", err)
+	}
+
+	allClients, err := f.listTmuxClients("")
+	if err != nil {
+		f.restoreTmuxTitles(origTitles, origTitleString)
 		return err
 	}
 
-	f.sleep(50 * time.Millisecond)
-	if err := focusWindow(terminalAppID, title); err != nil {
-		log.Printf("focus osc retry failed title=%q err=%v", title, err)
-		return err
+	// Record each client's original session so we can restore them.
+	type clientState struct {
+		tty     string
+		session string
 	}
-	return nil
+	var switched []clientState
+	defer func() {
+		for _, cs := range switched {
+			if _, err := f.runCommand("tmux", "switch-client", "-c", cs.tty, "-t", cs.session); err != nil {
+				log.Printf("focus set-titles restore client=%s session=%s err=%v", cs.tty, cs.session, err)
+			}
+		}
+		f.restoreTmuxTitles(origTitles, origTitleString)
+	}()
+
+	for _, clientTTY := range allClients {
+		clientSession, err := f.getTmuxClientSession(clientTTY)
+		if err != nil {
+			continue
+		}
+		if clientSession == sessionName {
+			// Already on target session — title should already match after select-window.
+			f.sleep(50 * time.Millisecond)
+			if err := focusWindow(terminalAppID, title); err == nil {
+				return nil
+			}
+			continue
+		}
+		// Switch this client to the target session.
+		log.Printf("focus set-titles retry switch-client client=%s from=%s to=%s", clientTTY, clientSession, sessionName)
+		if _, err := f.runCommand("tmux", "switch-client", "-c", clientTTY, "-t", sessionName); err != nil {
+			continue
+		}
+		switched = append(switched, clientState{tty: clientTTY, session: clientSession})
+
+		f.sleep(50 * time.Millisecond)
+		if err := focusWindow(terminalAppID, title); err == nil {
+			// Found it — remove this client from the restore list since it should stay.
+			switched = switched[:len(switched)-1]
+			return nil
+		}
+	}
+
+	log.Printf("focus set-titles retry failed title=%q", title)
+	return fmt.Errorf("wayland toplevel not found after trying all tmux clients for title %q", title)
 }
 
-func (f *sessionFocuser) writeOSCWindowTitle(ttyPath, title string) error {
-	if f.writeTTY == nil {
-		return errors.New("tty writer unavailable")
+func (f *sessionFocuser) getTmuxClientSession(clientTTY string) (string, error) {
+	output, err := f.runCommand("tmux", "display-message", "-p", "-t", clientTTY, "-F", "#{session_name}")
+	if err != nil {
+		return "", err
 	}
+	return strings.TrimSpace(string(output)), nil
+}
 
-	safeTitle := sanitizeOSCTitle(title)
-	payload := []byte(fmt.Sprintf("\033]0;%s\007\033]2;%s\007", safeTitle, safeTitle))
-	if err := f.writeTTY(ttyPath, payload); err != nil {
-		return fmt.Errorf("write osc title to %q: %w", ttyPath, err)
+func (f *sessionFocuser) restoreTmuxTitles(origTitles, origTitleString string) {
+	if _, err := f.runCommand("tmux", "set-option", "-g", "set-titles", origTitles); err != nil {
+		log.Printf("focus set-titles restore failed option=set-titles value=%q err=%v", origTitles, err)
 	}
+	if _, err := f.runCommand("tmux", "set-option", "-g", "set-titles-string", origTitleString); err != nil {
+		log.Printf("focus set-titles restore failed option=set-titles-string value=%q err=%v", origTitleString, err)
+	}
+}
 
-	return nil
+func (f *sessionFocuser) getTmuxGlobalOption(name string) (string, error) {
+	output, err := f.runCommand("tmux", "show-options", "-gv", name)
+	if err != nil {
+		return "", fmt.Errorf("get tmux option %q: %w", name, err)
+	}
+	return strings.TrimSpace(string(output)), nil
 }
 
 func preferredTerminalTitle(pane tmuxPane) string {
