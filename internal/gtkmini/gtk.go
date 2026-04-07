@@ -47,11 +47,30 @@ static gboolean gtkmini_tick_cb(GtkWidget *widget, GdkFrameClock *frame_clock, g
 }
 
 static void gtkmini_click_cb(GtkGestureClick *gesture, gint n_press, gdouble x, gdouble y, gpointer data) {
-	(void)gesture;
 	(void)n_press;
 	(void)x;
 	(void)y;
+	GdkEvent *event = gtk_gesture_get_last_event(GTK_GESTURE(gesture), gtk_gesture_get_last_updated_sequence(GTK_GESTURE(gesture)));
+	if (event != NULL) {
+		GdkModifierType state = gdk_event_get_modifier_state(event);
+		if (state & GDK_SHIFT_MASK) {
+			return;
+		}
+	}
 	gtkminiInvokeVoid((uintptr_t)data);
+}
+
+static void gtkmini_shift_click_cb(GtkGestureClick *gesture, gint n_press, gdouble x, gdouble y, gpointer data) {
+	(void)n_press;
+	(void)x;
+	(void)y;
+	GdkEvent *event = gtk_gesture_get_last_event(GTK_GESTURE(gesture), gtk_gesture_get_last_updated_sequence(GTK_GESTURE(gesture)));
+	if (event != NULL) {
+		GdkModifierType state = gdk_event_get_modifier_state(event);
+		if (state & GDK_SHIFT_MASK) {
+			gtkminiInvokeVoid((uintptr_t)data);
+		}
+	}
 }
 
 static void gtkmini_button_clicked_cb(GtkButton *button, gpointer data) {
@@ -432,6 +451,12 @@ static void gtkmini_widget_set_margin_top(GtkWidget *widget, gint margin) {
 static void gtkmini_widget_add_click_controller(GtkWidget *widget, uintptr_t data) {
 	GtkGesture *click = gtk_gesture_click_new();
 	g_signal_connect_data(click, "released", G_CALLBACK(gtkmini_click_cb), (gpointer)data, gtkmini_destroy_notify, 0);
+	gtk_widget_add_controller(widget, GTK_EVENT_CONTROLLER(click));
+}
+
+static void gtkmini_widget_add_shift_click_controller(GtkWidget *widget, uintptr_t data) {
+	GtkGesture *click = gtk_gesture_click_new();
+	g_signal_connect_data(click, "released", G_CALLBACK(gtkmini_shift_click_cb), (gpointer)data, gtkmini_destroy_notify, 0);
 	gtk_widget_add_controller(widget, GTK_EVENT_CONTROLLER(click));
 }
 
@@ -1119,6 +1144,10 @@ func (w *Widget) SetMarginTop(value int) {
 
 func (w *Widget) ConnectClick(fn func()) {
 	C.gtkmini_widget_add_click_controller(w.ptr, newHandle(fn))
+}
+
+func (w *Widget) ConnectShiftClick(fn func()) {
+	C.gtkmini_widget_add_shift_click_controller(w.ptr, newHandle(fn))
 }
 
 func (w *Widget) ConnectHover(enter, leave func()) {

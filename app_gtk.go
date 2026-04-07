@@ -1157,6 +1157,12 @@ func (ui *gtkUI) buildSessionRow(session payloadSession, interactive bool) *gtkm
 			ui.pinPanel()
 			ui.openDetail(session.ID)
 		})
+		row.ConnectShiftClick(func() {
+			ui.closePanel()
+			if gtkSessionFocuser != nil {
+				triggerSessionFocus(gtkSessionFocuser, session.ID)
+			}
+		})
 	}
 
 	dot := gtkmini.NewBox(gtkmini.OrientationHorizontal, 0)
