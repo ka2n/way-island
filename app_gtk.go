@@ -897,6 +897,14 @@ func (ui *gtkUI) setStackView(panelView int) {
 					}
 					if ui.panelView == panelViewDetail {
 						ui.syncDetailHostHeight(false)
+						// Re-measure after applyShellWidth's QueueResize has been
+						// processed by GTK's layout pass to get the correct height.
+						gtkmini.TimeoutAdd(16, func() bool {
+							if ui.panelView == panelViewDetail {
+								ui.syncDetailHostHeight(false)
+							}
+							return false
+						})
 					}
 					return false
 				}
