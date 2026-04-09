@@ -14,6 +14,7 @@ import (
 )
 
 const DefaultSessionTimeout = 5 * time.Minute
+const DefaultTranscriptReadDelay = 500 * time.Millisecond
 const maxLastUserMessageRunes = 140
 
 type SessionState string
@@ -70,6 +71,11 @@ type SessionManager struct {
 	timeout  time.Duration
 	now      func() time.Time
 	updates  chan SessionUpdate
+
+	// transcriptReadDelay is the delay before reading the Claude transcript
+	// after a Stop hook fires. The Stop hook fires before Claude Code writes
+	// the current response to the transcript file, so we need to wait.
+	transcriptReadDelay time.Duration
 }
 
 type sessionMonitorEntry struct {
@@ -174,11 +180,12 @@ func NewSessionManager(timeout time.Duration) *SessionManager {
 	}
 
 	return &SessionManager{
-		sessions: make(map[string]Session),
-		monitors: make(map[string]sessionMonitorEntry),
-		timeout:  timeout,
-		now:      time.Now,
-		updates:  make(chan SessionUpdate, 32),
+		sessions:            make(map[string]Session),
+		monitors:            make(map[string]sessionMonitorEntry),
+		timeout:             timeout,
+		now:                 time.Now,
+		updates:             make(chan SessionUpdate, 32),
+		transcriptReadDelay: DefaultTranscriptReadDelay,
 	}
 }
 
@@ -249,16 +256,16 @@ func (m *SessionManager) HandleMessage(message Message) {
 		}
 	}
 	if message.Event == string(SessionStateIdle) && !session.IsSubagent {
-		var text string
-		var ok bool
 		switch hookSource {
 		case "claude":
-			text, ok = readClaudeLastAssistantMessageFunc(message.Data)
+			// The Stop hook fires before Claude Code writes the current
+			// response to the transcript file. Defer the read so the
+			// transcript has time to be flushed.
+			go m.deferredReadLastAssistantMessage(session.ID, message.Data)
 		case "codex":
-			text, ok = readCodexLastAssistantMessageFunc(message.Data)
-		}
-		if ok {
-			session.LastAssistantMessage = text
+			if text, ok := readCodexLastAssistantMessageFunc(message.Data); ok {
+				session.LastAssistantMessage = text
+			}
 		}
 	}
 	session.State = adjustSessionState(message.Event, session.State, session.IsSubagent)
@@ -291,6 +298,31 @@ func shouldEnrichCodexSessionMetadata(existing Session, current Session) bool {
 	return true
 }
 
+
+func (m *SessionManager) deferredReadLastAssistantMessage(sessionID string, data map[string]any) {
+	time.Sleep(m.transcriptReadDelay)
+
+	text, ok := readClaudeLastAssistantMessageFunc(data)
+	if !ok {
+		return
+	}
+
+	m.mu.Lock()
+	session, exists := m.sessions[sessionID]
+	if !exists || session.LastAssistantMessage == text {
+		m.mu.Unlock()
+		return
+	}
+	session.LastAssistantMessage = text
+	m.sessions[sessionID] = session
+	m.mu.Unlock()
+
+	m.notify(SessionUpdate{
+		Type:    SessionUpdateUpsert,
+		Session: session,
+		Reason:  "deferred:last_assistant_message",
+	})
+}
 
 func (m *SessionManager) removeSession(sessionID string, reason string) {
 	m.mu.Lock()

@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestReadClaudeSessionMetadataReadsSubagents(t *testing.T) {
@@ -134,6 +135,7 @@ func TestSessionManagerReadsLastAssistantMessageOnStop(t *testing.T) {
 	_ = transcriptFile.Close()
 
 	manager := NewSessionManager(DefaultSessionTimeout)
+	manager.transcriptReadDelay = 10 * time.Millisecond // short delay for test
 	manager.Start(context.Background(), DefaultSessionTimeout)
 
 	manager.HandleMessage(Message{
@@ -154,9 +156,71 @@ func TestSessionManagerReadsLastAssistantMessageOnStop(t *testing.T) {
 		},
 	})
 
+	// First update: idle -> waiting (no LastAssistantMessage yet since read is deferred)
 	update := waitForSessionUpdate(t, manager.Updates())
+	if update.Session.State != SessionStateWaiting {
+		t.Fatalf("State = %q, want %q", update.Session.State, SessionStateWaiting)
+	}
+
+	// Second update: deferred transcript read delivers the message
+	update = waitForSessionUpdate(t, manager.Updates())
 	if update.Session.LastAssistantMessage != "here is my answer" {
 		t.Fatalf("LastAssistantMessage = %q, want %q", update.Session.LastAssistantMessage, "here is my answer")
+	}
+}
+
+func TestSessionManagerDeferredReadPicksUpLateTranscriptWrite(t *testing.T) {
+	t.Parallel()
+
+	transcriptFile, err := os.CreateTemp(t.TempDir(), "*.jsonl")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Transcript initially has only an old response (simulates Stop hook
+	// firing before the current response is written).
+	oldContent := `{"type":"assistant","message":{"stop_reason":"end_turn","content":[{"type":"text","text":"old response"}]}}` + "\n"
+	if _, err := transcriptFile.WriteString(oldContent); err != nil {
+		t.Fatal(err)
+	}
+	_ = transcriptFile.Close()
+
+	manager := NewSessionManager(DefaultSessionTimeout)
+	manager.transcriptReadDelay = 50 * time.Millisecond
+	manager.Start(context.Background(), DefaultSessionTimeout)
+
+	manager.HandleMessage(Message{
+		SessionID: "session-1",
+		Event:     "session_start",
+		Data: map[string]any{
+			"_hook_source": "claude",
+		},
+	})
+	waitForSessionUpdate(t, manager.Updates())
+
+	manager.HandleMessage(Message{
+		SessionID: "session-1",
+		Event:     string(SessionStateIdle),
+		Data: map[string]any{
+			"_hook_source":    "claude",
+			"transcript_path": transcriptFile.Name(),
+		},
+	})
+
+	// First update: state goes to waiting
+	waitForSessionUpdate(t, manager.Updates())
+
+	// Simulate Claude Code writing the response AFTER the Stop hook fires
+	newContent := oldContent +
+		`{"type":"assistant","message":{"stop_reason":"end_turn","content":[{"type":"thinking","thinking":"..."}]}}` + "\n" +
+		`{"type":"assistant","message":{"stop_reason":"end_turn","content":[{"type":"text","text":"new response"}]}}` + "\n"
+	if err := os.WriteFile(transcriptFile.Name(), []byte(newContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Deferred read picks up "new response"
+	update := waitForSessionUpdate(t, manager.Updates())
+	if update.Session.LastAssistantMessage != "new response" {
+		t.Fatalf("LastAssistantMessage = %q, want %q", update.Session.LastAssistantMessage, "new response")
 	}
 }
 
