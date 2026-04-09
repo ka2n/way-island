@@ -96,12 +96,12 @@ func (m *overlayModel) Session(id string) (socket.Session, bool) {
 
 // Payload returns a base64-encoded TSV string for the GTK UI.
 // Sessions are returned in stable insertion order; new sessions are appended to the end.
-// Format (11 tab-separated base64 fields per line):
+// Format (12 tab-separated base64 fields per line):
 //
 //	base64(SessionID)\tbase64(DisplayName)\tbase64(State)\tbase64(CurrentAction)\t
 //	base64(LastUserMessage)\tbase64(ParentSessionID)\tbase64(IsSubagent "0"|"1")\t
 //	base64(AgentNickname)\tbase64(HookSource)\tbase64(Subagents JSON)\t
-//	base64(IsSuppressed "0"|"1")\n
+//	base64(IsSuppressed "0"|"1")\tbase64(LastAssistantMessage)\n
 func (m *overlayModel) Payload() string {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -154,6 +154,8 @@ func (m *overlayModel) Payload() string {
 		} else {
 			builder.WriteString(base64.StdEncoding.EncodeToString([]byte("0")))
 		}
+		builder.WriteByte('\t')
+		builder.WriteString(base64.StdEncoding.EncodeToString([]byte(truncateLastUserMessage(session.LastAssistantMessage))))
 		builder.WriteByte('\n')
 	}
 

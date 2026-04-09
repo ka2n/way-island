@@ -216,6 +216,7 @@ func (s *Server) handleInspect(conn net.Conn) {
 		CurrentAction          string            `json:"current_action,omitempty"`
 		CurrentToolFailed      bool              `json:"current_tool_failed,omitempty"`
 		LastUserMessage        string            `json:"last_user_message,omitempty"`
+		LastAssistantMessage   string            `json:"last_assistant_message,omitempty"`
 		ParentSessionID        string            `json:"parent_session_id,omitempty"`
 		IsSubagent             bool              `json:"is_subagent,omitempty"`
 		AgentNickname          string            `json:"agent_nickname,omitempty"`
@@ -243,6 +244,7 @@ func (s *Server) handleInspect(conn net.Conn) {
 			CurrentAction:          s.CurrentAction,
 			CurrentToolFailed:      s.CurrentToolFailed,
 			LastUserMessage:        s.LastUserMessage,
+			LastAssistantMessage:   s.LastAssistantMessage,
 			ParentSessionID:        s.ParentSessionID,
 			IsSubagent:             s.IsSubagent,
 			AgentNickname:          s.AgentNickname,

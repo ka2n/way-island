@@ -21,8 +21,10 @@ type claudeSessionMetadata struct {
 }
 
 var readClaudeSessionMetadataFunc = readClaudeSessionMetadata
+var readClaudeLastAssistantMessageFunc = readClaudeLastAssistantMessage
 
-func readClaudeSessionMetadata(sessionID string, cwd string) (claudeSessionMetadata, bool) {
+func readClaudeSessionMetadata(sessionID string, data map[string]any) (claudeSessionMetadata, bool) {
+	cwd := firstString(data, "cwd")
 	if strings.TrimSpace(sessionID) == "" || strings.TrimSpace(cwd) == "" {
 		return claudeSessionMetadata{}, false
 	}
@@ -135,6 +137,63 @@ func readClaudeSubagentState(path string) (string, bool) {
 		return "", false
 	}
 	return state, true
+}
+
+func readClaudeLastAssistantMessage(data map[string]any) (string, bool) {
+	transcriptPath := firstString(data, "transcript_path")
+	if strings.TrimSpace(transcriptPath) == "" {
+		return "", false
+	}
+	file, err := os.Open(transcriptPath)
+	if err != nil {
+		return "", false
+	}
+	defer file.Close()
+
+	var lastText string
+	scanner := bufio.NewScanner(file)
+	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
+	for scanner.Scan() {
+		if text, ok := extractClaudeEndTurnText(scanner.Bytes()); ok {
+			lastText = text
+		}
+	}
+	if lastText == "" {
+		return "", false
+	}
+	return lastText, true
+}
+
+func extractClaudeEndTurnText(line []byte) (string, bool) {
+	var entry struct {
+		Type    string `json:"type"`
+		Message *struct {
+			StopReason string `json:"stop_reason"`
+			Content    []struct {
+				Type string `json:"type"`
+				Text string `json:"text"`
+			} `json:"content"`
+		} `json:"message"`
+	}
+	if err := json.Unmarshal(line, &entry); err != nil {
+		return "", false
+	}
+	if entry.Type != "assistant" || entry.Message == nil {
+		return "", false
+	}
+	if strings.TrimSpace(entry.Message.StopReason) != "end_turn" {
+		return "", false
+	}
+	var parts []string
+	for _, c := range entry.Message.Content {
+		if c.Type == "text" && strings.TrimSpace(c.Text) != "" {
+			parts = append(parts, strings.TrimSpace(c.Text))
+		}
+	}
+	if len(parts) == 0 {
+		return "", false
+	}
+	return strings.Join(parts, "\n"), true
 }
 
 func deriveClaudeSubagentState(line []byte) (string, bool) {

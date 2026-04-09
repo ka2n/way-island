@@ -62,8 +62,9 @@ type payloadSession struct {
 	Name            string
 	State           string
 	Action          string
-	LastUserMessage string
-	ParentSessionID string
+	LastUserMessage      string
+	LastAssistantMessage string
+	ParentSessionID      string
 	IsSubagent      bool
 	AgentNickname   string
 	HookSource      string
@@ -177,7 +178,7 @@ func buildDetailViewModel(sessions []payloadSession, selectedSessionID string) *
 			State:         session.State,
 			StateClass:    statusClass(session.State),
 			StatusLabel:   statusLabel(session.State),
-			BodyText:      detailBodyText(session.Action, session.LastUserMessage),
+			BodyText:      detailBodyText(session.State, session.Action, session.LastUserMessage, session.LastAssistantMessage),
 			SubagentCount: countDirectSubagents(sessions, session.ID),
 			SubagentRows:  buildSubagentRowsViewModel(sessions, session.ID),
 		}
@@ -198,7 +199,7 @@ func parsePayloadSessions(payload string) []payloadSession {
 			continue
 		}
 
-		fields := strings.SplitN(line, "\t", 11)
+		fields := strings.SplitN(line, "\t", 12)
 		if len(fields) < 3 {
 			continue
 		}
@@ -271,19 +272,27 @@ func parsePayloadSessions(payload string) []payloadSession {
 				isSuppressed = decodedSuppressed == "1"
 			}
 		}
+		lastAssistantMessage := ""
+		if len(fields) >= 12 {
+			decodedLastAssistantMessage, ok := decodePayloadField(fields[11])
+			if ok {
+				lastAssistantMessage = decodedLastAssistantMessage
+			}
+		}
 
 		sessions = append(sessions, payloadSession{
-			ID:              sessionID,
-			Name:            name,
-			State:           state,
-			Action:          action,
-			LastUserMessage: lastUserMessage,
-			ParentSessionID: parentSessionID,
-			IsSubagent:      isSubagent,
-			AgentNickname:   agentNickname,
-			HookSource:      hookSource,
-			Subagents:       subagents,
-			IsSuppressed:    isSuppressed,
+			ID:                   sessionID,
+			Name:                 name,
+			State:                state,
+			Action:               action,
+			LastUserMessage:      lastUserMessage,
+			LastAssistantMessage: lastAssistantMessage,
+			ParentSessionID:      parentSessionID,
+			IsSubagent:           isSubagent,
+			AgentNickname:        agentNickname,
+			HookSource:           hookSource,
+			Subagents:            subagents,
+			IsSuppressed:         isSuppressed,
 		})
 	}
 
@@ -305,7 +314,10 @@ func actionOrStatusLabel(action, state string) string {
 	return statusLabel(state)
 }
 
-func detailBodyText(action string, lastUserMessage string) string {
+func detailBodyText(state string, action string, lastUserMessage string, lastAssistantMessage string) string {
+	if state == "waiting" && lastAssistantMessage != "" {
+		return lastAssistantMessage
+	}
 	switch {
 	case action != "" && lastUserMessage != "":
 		return action + "\n\nLast user message: " + lastUserMessage

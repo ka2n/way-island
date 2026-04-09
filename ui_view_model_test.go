@@ -253,6 +253,14 @@ func encodePayloadSessions(sessions []payloadSession) string {
 			panic(err)
 		}
 		builder.WriteString(base64.StdEncoding.EncodeToString(subagentsJSON))
+		builder.WriteByte('\t')
+		if session.IsSuppressed {
+			builder.WriteString(base64.StdEncoding.EncodeToString([]byte("1")))
+		} else {
+			builder.WriteString(base64.StdEncoding.EncodeToString([]byte("0")))
+		}
+		builder.WriteByte('\t')
+		builder.WriteString(base64.StdEncoding.EncodeToString([]byte(session.LastAssistantMessage)))
 		builder.WriteByte('\n')
 	}
 	return builder.String()

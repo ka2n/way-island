@@ -16,8 +16,9 @@ type codexSessionMetadata struct {
 }
 
 var readCodexSessionMetadataFunc = readCodexSessionMetadata
+var readCodexLastAssistantMessageFunc = readCodexLastAssistantMessage
 
-func readCodexSessionMetadata(sessionID string) (codexSessionMetadata, bool) {
+func readCodexSessionMetadata(sessionID string, _ map[string]any) (codexSessionMetadata, bool) {
 	if strings.TrimSpace(sessionID) == "" {
 		return codexSessionMetadata{}, false
 	}
@@ -93,3 +94,12 @@ func readCodexSessionMetadataFile(path string, sessionID string) (codexSessionMe
 	}
 	return metadata, metadata.IsSubagent || metadata.AgentNickname != ""
 }
+
+func readCodexLastAssistantMessage(data map[string]any) (string, bool) {
+	text := strings.TrimSpace(firstString(data, "last_assistant_message"))
+	if text == "" {
+		return "", false
+	}
+	return text, true
+}
+

@@ -361,7 +361,7 @@ func TestSessionManagerIgnoresStaleProcessExitAfterPIDChange(t *testing.T) {
 
 func TestSessionManagerEnrichesCodexSubagentMetadata(t *testing.T) {
 	orig := readCodexSessionMetadataFunc
-	readCodexSessionMetadataFunc = func(sessionID string) (codexSessionMetadata, bool) {
+	readCodexSessionMetadataFunc = func(sessionID string, _ map[string]any) (codexSessionMetadata, bool) {
 		if sessionID != "session-1" {
 			return codexSessionMetadata{}, false
 		}
@@ -399,8 +399,9 @@ func TestSessionManagerEnrichesCodexSubagentMetadata(t *testing.T) {
 func TestSessionManagerEnrichesClaudeSubagentMetadata(t *testing.T) {
 	orig := readClaudeSessionMetadataFunc
 	callCount := 0
-	readClaudeSessionMetadataFunc = func(sessionID string, cwd string) (claudeSessionMetadata, bool) {
+	readClaudeSessionMetadataFunc = func(sessionID string, data map[string]any) (claudeSessionMetadata, bool) {
 		callCount++
+		cwd := firstString(data, "cwd")
 		if sessionID != "session-1" || cwd != "/tmp/project" {
 			return claudeSessionMetadata{}, false
 		}
@@ -535,7 +536,7 @@ func TestSessionManagerKeepsSubagentIdleHookIdle(t *testing.T) {
 	t.Parallel()
 
 	orig := readCodexSessionMetadataFunc
-	readCodexSessionMetadataFunc = func(sessionID string) (codexSessionMetadata, bool) {
+	readCodexSessionMetadataFunc = func(sessionID string, _ map[string]any) (codexSessionMetadata, bool) {
 		if sessionID != "session-1" {
 			return codexSessionMetadata{}, false
 		}

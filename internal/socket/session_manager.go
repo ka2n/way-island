@@ -33,6 +33,7 @@ type Session struct {
 	CurrentAction          string
 	CurrentToolFailed      bool
 	LastUserMessage        string
+	LastAssistantMessage   string
 	ParentSessionID        string
 	IsSubagent             bool
 	AgentNickname          string
@@ -210,7 +211,8 @@ func (m *SessionManager) HandleMessage(message Message) {
 		CurrentTool:            resolveCurrentTool(existing.CurrentTool, message.Event, message.Data),
 		CurrentAction:          resolveCurrentAction(existing.CurrentAction, message.Event, message.Data),
 		CurrentToolFailed:      resolveCurrentToolFailed(existing.CurrentToolFailed, message.Event),
-		LastUserMessage:        resolveLastUserMessage(existing.LastUserMessage, message.Data),
+		LastUserMessage:      resolveLastUserMessage(existing.LastUserMessage, message.Data),
+		LastAssistantMessage: existing.LastAssistantMessage,
 		ParentSessionID:        parentSessionID,
 		IsSubagent:             isSubagent,
 		AgentNickname:          agentNickname,
@@ -227,7 +229,7 @@ func (m *SessionManager) HandleMessage(message Message) {
 		TermProgram:            resolveString(existing.TermProgram, message.Data, "_term_program"),
 	}
 	if hookSource == "codex" && shouldEnrichCodexSessionMetadata(existing, session) {
-		if metadata, ok := readCodexSessionMetadataFunc(message.SessionID); ok {
+		if metadata, ok := readCodexSessionMetadataFunc(message.SessionID, message.Data); ok {
 			if session.ParentSessionID == "" {
 				session.ParentSessionID = metadata.ParentSessionID
 			}
@@ -239,11 +241,24 @@ func (m *SessionManager) HandleMessage(message Message) {
 			}
 		}
 	}
-	if hookSource == "claude" && shouldEnrichClaudeSessionMetadata(existing, session) {
-		if metadata, ok := readClaudeSessionMetadataFunc(message.SessionID, firstString(message.Data, "cwd")); ok {
+	if hookSource == "claude" {
+		if metadata, ok := readClaudeSessionMetadataFunc(message.SessionID, message.Data); ok {
 			if len(metadata.Subagents) > 0 {
 				session.Subagents = metadata.Subagents
 			}
+		}
+	}
+	if message.Event == string(SessionStateIdle) && !session.IsSubagent {
+		var text string
+		var ok bool
+		switch hookSource {
+		case "claude":
+			text, ok = readClaudeLastAssistantMessageFunc(message.Data)
+		case "codex":
+			text, ok = readCodexLastAssistantMessageFunc(message.Data)
+		}
+		if ok {
+			session.LastAssistantMessage = text
 		}
 	}
 	session.State = adjustSessionState(message.Event, session.State, session.IsSubagent)
@@ -276,9 +291,6 @@ func shouldEnrichCodexSessionMetadata(existing Session, current Session) bool {
 	return true
 }
 
-func shouldEnrichClaudeSessionMetadata(existing Session, current Session) bool {
-	return strings.TrimSpace(current.HookSource) == "claude"
-}
 
 func (m *SessionManager) removeSession(sessionID string, reason string) {
 	m.mu.Lock()
