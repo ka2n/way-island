@@ -395,13 +395,18 @@ func (ui *gtkUI) animateDetailHeight(from, to int, hideWhenDone bool, animate bo
 	ui.detailHost.SetVisible(true)
 
 	if !animate || from == to {
-		ui.detailHost.ClipSetHeight(to)
-		ui.detailHost.QueueResize()
-		ui.cachedDetailHeight = to
 		if hideWhenDone && to == 0 {
 			ui.detailHost.ClipSetHeight(0)
 			ui.detailHost.QueueResize()
 			ui.detailHost.SetVisible(false)
+		} else {
+			// Use -1 to let GTK derive height from the child's natural size,
+			// avoiding measurement/width mismatches.
+			ui.detailHost.ClipSetHeight(-1)
+			ui.detailHost.QueueResize()
+		}
+		if to > 0 {
+			ui.cachedDetailHeight = to
 		}
 		return
 	}
@@ -427,14 +432,17 @@ func (ui *gtkUI) animateDetailHeight(from, to int, hideWhenDone bool, animate bo
 		if progress >= 1 {
 			debugAnimationLog("animateDetailHeight done panel=%d final=%d", ui.panelView, ui.detailAnimTo)
 			ui.detailAnimSource = 0
-			ui.detailHost.ClipSetHeight(ui.detailAnimTo)
-			if ui.detailAnimTo > 0 {
-				ui.cachedDetailHeight = ui.detailAnimTo
-			}
 			if hideWhenDone && ui.detailAnimTo == 0 {
 				ui.detailHost.ClipSetHeight(0)
 				ui.detailHost.QueueResize()
 				ui.detailHost.SetVisible(false)
+			} else {
+				// Release clip constraint so GTK uses the child's natural height.
+				ui.detailHost.ClipSetHeight(-1)
+				ui.detailHost.QueueResize()
+			}
+			if ui.detailAnimTo > 0 {
+				ui.cachedDetailHeight = ui.detailAnimTo
 			}
 			return false
 		}
@@ -897,14 +905,6 @@ func (ui *gtkUI) setStackView(panelView int) {
 					}
 					if ui.panelView == panelViewDetail {
 						ui.syncDetailHostHeight(false)
-						// Re-measure after applyShellWidth's QueueResize has been
-						// processed by GTK's layout pass to get the correct height.
-						gtkmini.TimeoutAdd(16, func() bool {
-							if ui.panelView == panelViewDetail {
-								ui.syncDetailHostHeight(false)
-							}
-							return false
-						})
 					}
 					return false
 				}
